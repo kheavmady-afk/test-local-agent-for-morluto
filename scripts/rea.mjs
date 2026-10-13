@@ -36,6 +36,16 @@ if (
   process.env.PLAYWRIGHT_BROWSERS_PATH = join(cacheRoot, "ms-playwright");
 }
 
+if (process.env.REA_JADX_MCP_JAR === undefined) {
+  const defaultJadxJar = "/opt/jadx/jadx-headless-mcp-0.7.1-all.jar";
+  try {
+    await access(defaultJadxJar);
+    process.env.REA_JADX_MCP_JAR = defaultJadxJar;
+  } catch {
+    // Default JADX JAR not present at standard path
+  }
+}
+
 const runtimeFiles = isMcpMode
   ? ["dist/mcp/main.js"]
   : isMcpDoctorMode

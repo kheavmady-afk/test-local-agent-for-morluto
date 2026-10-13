@@ -1,0 +1,166 @@
+{
+  "apk_name": "SMIS-Parents-app-v0.1.apk",
+  "scan_time": "2026-10-13T18:13:17.137358",
+  "file_size_bytes": 59731283,
+  "scanned_items_checklist": {
+    "flutter_framework": "Found (Flutter AOT)",
+    "dart_sdk_version": "Found (3.13.4)",
+    "dart_snapshot_hash": "Found (0451907c2eaa8467e848c0067bfe8ed4)",
+    "flutter_engine_commit": "Found (af7e796e161ae0bb1ff0758c71a7105418bd9ded)",
+    "developer_source_path": "Found (/Users/meanpheakdey/MPTC/Development/mptc-schoolis-flutter-app)",
+    "state_management": "Found (Built with GetX (SmartManagement) and local storage via GetStorage)",
+    "primary_server_host": "Found (https://devsmn.tele-ict.com)",
+    "authentication_endpoints": "Found (6 endpoints)",
+    "student_academic_endpoints": "Found (8 endpoints)",
+    "client_application_routes": "Found (6 routes: /loginparen, /loginstudent, /parent...)",
+    "cloud_storage_cdn_assets": "Found (https://res.cloudinary.com/kdey/image/upload/v1767948582/Rectangle_6888_jaeua7.png)",
+    "social_integration_links": "Found (https://facebook.com/profile.php)",
+    "google_api_keys": "Not found",
+    "aws_access_keys": "Not found",
+    "jwt_tokens": "Not found",
+    "embedded_private_keys": "Not found",
+    "firebase_database_urls": "Not found",
+    "custom_uri_schemes": "Found (fb-messenger://user/)",
+    "dangerous_permissions": "Found (android.permission.POST_NOTIFICATIONS)",
+    "exported_activities": "Found (2 activities)",
+    "exported_broadcast_receivers": "Found (1 receivers)",
+    "background_services": "Not found",
+    "content_providers": "Found (1 providers)",
+    "android_debuggable": "Not found (Disabled - Production Build)",
+    "android_allow_backup": "Not found (Omitted - Not explicitly disabled)",
+    "cleartext_http_traffic": "Not found (Enforced HTTPS)",
+    "native_stack_canaries": "Found in libdartjni.so, libflutter.so (Not found in libapp.so)",
+    "native_pie_hardening": "Found (libapp.so, libdartjni.so, libflutter.so)",
+    "native_relro": "Not found (Disabled)",
+    "native_nx_stack": "Not found (Disabled)"
+  },
+  "package_id": "com.cspp_mobiles.dev",
+  "version_name": "1.0.0",
+  "version_code": "4",
+  "min_sdk": "24",
+  "target_sdk": "36",
+  "main_activity": "com.cspp_mobiles.MainActivity",
+  "flutter_detected": true,
+  "classes_count": 686,
+  "permissions": [
+    "android.permission.INTERNET",
+    "android.permission.POST_NOTIFICATIONS",
+    "com.cspp_mobiles.dev.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+  ],
+  "dangerous_permissions": ["android.permission.POST_NOTIFICATIONS"],
+  "activities": [
+    "com.cspp_mobiles.MainActivity",
+    "io.flutter.plugins.urllauncher.WebViewActivity"
+  ],
+  "services": "Not found",
+  "receivers": ["androidx.profileinstaller.ProfileInstallReceiver"],
+  "providers": ["androidx.startup.InitializationProvider"],
+  "security_issues": [
+    {
+      "severity": "LOW",
+      "flag": "android:allowBackup (Omitted)",
+      "desc": "allowBackup is not explicitly disabled; defaults to true on older API levels."
+    }
+  ],
+  "adb_triggers": [
+    {
+      "component": "com.cspp_mobiles.MainActivity",
+      "type": "Activity",
+      "command": "adb shell am start -n com.cspp_mobiles.dev/com.cspp_mobiles.MainActivity",
+      "permission": "None"
+    },
+    {
+      "component": "io.flutter.plugins.urllauncher.WebViewActivity",
+      "type": "Activity",
+      "command": "adb shell am start -n com.cspp_mobiles.dev/io.flutter.plugins.urllauncher.WebViewActivity",
+      "permission": "None"
+    },
+    {
+      "component": "androidx.profileinstaller.ProfileInstallReceiver",
+      "type": "Broadcast Receiver",
+      "command": "adb shell am broadcast -n com.cspp_mobiles.dev/androidx.profileinstaller.ProfileInstallReceiver",
+      "permission": "android.permission.DUMP"
+    }
+  ],
+  "elf_security": {
+    "libapp.so": {
+      "path": "lib/arm64-v8a/libapp.so",
+      "size_bytes": 6685576,
+      "stack_canary": false,
+      "pie": true,
+      "relro": false,
+      "nx_stack": false
+    },
+    "libdartjni.so": {
+      "path": "lib/arm64-v8a/libdartjni.so",
+      "size_bytes": 131432,
+      "stack_canary": true,
+      "pie": true,
+      "relro": false,
+      "nx_stack": false
+    },
+    "libflutter.so": {
+      "path": "lib/arm64-v8a/libflutter.so",
+      "size_bytes": 11747864,
+      "stack_canary": true,
+      "pie": true,
+      "relro": false,
+      "nx_stack": false
+    }
+  },
+  "discovered_secrets": {
+    "google_api_keys": "Not found",
+    "aws_access_keys": "Not found",
+    "jwt_tokens": "Not found",
+    "private_keys": "Not found",
+    "custom_schemes": ["fb-messenger://user/"],
+    "firebase_urls": "Not found"
+  },
+  "dart_snapshot_hash": "0451907c2eaa8467e848c0067bfe8ed4",
+  "supported_abis": ["arm64-v8a", "armeabi-v7a", "x86_64"],
+  "flutter_deep_metadata": {
+    "arch": "arm64-v8a",
+    "primary_server_host": "https://devsmn.tele-ict.com",
+    "engine_commit": "af7e796e161ae0bb1ff0758c71a7105418bd9ded",
+    "dart_sdk_version": "3.13.4",
+    "build_flags": [
+      "product",
+      "dwarf_stack_traces",
+      "arm64",
+      "android",
+      "compressed-pointers"
+    ],
+    "auth_endpoints": [
+      "POST /api/v2/auth/signIn/parent/username (Parent login flow)",
+      "POST mobile-api/auth/sign-in/student (Student login flow)",
+      "POST mobile-api/auth/sign-in/email/otp (OTP verification)",
+      "POST mobile-api/auth/refresh-token",
+      "POST mobile-api/auth/password/change",
+      "POST mobile-api/auth/logout"
+    ],
+    "student_endpoints": [
+      "GET mobile-api/student/home",
+      "GET mobile-api/student/profile",
+      "GET mobile-api/student/preferences",
+      "GET mobile-api/student/schedule",
+      "GET mobile-api/student/calendar/events",
+      "GET mobile-api/student/announcements & /api/v1/announcement/m",
+      "GET mobile-api/student/academic/results/ranking",
+      "GET mobile-api/student/academic/results/transcripts"
+    ],
+    "routes": [
+      "/loginparen",
+      "/loginstudent",
+      "/parent",
+      "/student",
+      "/student_announcement",
+      "/student_id_shortcut"
+    ],
+    "developer_source_path": "/Users/meanpheakdey/MPTC/Development/mptc-schoolis-flutter-app",
+    "cloud_assets": [
+      "https://res.cloudinary.com/kdey/image/upload/v1767948582/Rectangle_6888_jaeua7.png"
+    ],
+    "social_links": ["https://facebook.com/profile.php"],
+    "state_management": "Built with GetX (SmartManagement) and local storage via GetStorage"
+  }
+}

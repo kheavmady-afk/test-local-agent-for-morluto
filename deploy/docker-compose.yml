@@ -1,0 +1,104 @@
+# ==============================================================================
+# REA (Reverse Engineer Anything) Docker Compose Definition
+# ==============================================================================
+# Isolated Project: 'rea'
+# Prevents namespace, container name, and network collisions with other systems.
+# ==============================================================================
+
+name: rea
+
+services:
+  # ----------------------------------------------------------------------------
+  # Group: core - REA CLI Engine & Agent MCP Server Daemon
+  # ----------------------------------------------------------------------------
+  rea-core:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: core
+    image: rea:core
+    container_name: rea-core
+    profiles:
+      - core
+      - all
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - REA_LOG_LEVEL=${REA_LOG_LEVEL:-info}
+      - REA_JADX_MCP_JAR=/opt/jadx/jadx-headless-mcp-0.7.1-all.jar
+    volumes:
+      - ${REA_TARGETS_DIR:-../targets}:/workspace/targets:ro
+      - ${REA_OUTPUT_DIR:-../output}:/workspace/output:rw
+      - rea-config:/root/.rea
+    networks:
+      - rea-network
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    command: ["tail", "-f", "/dev/null"]
+    healthcheck:
+      test: ["CMD", "rea", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # Group: web - REA Documentation, Guides & Showcase Website
+  # ----------------------------------------------------------------------------
+  rea-web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: web
+    image: rea:web
+    container_name: rea-web
+    profiles:
+      - web
+      - all
+    ports:
+      - "${REA_WEB_PORT:-4173}:80"
+    networks:
+      - rea-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # Group: inspector - Interactive MCP Web UI for Exploring REA Tools
+  # ----------------------------------------------------------------------------
+  rea-inspector:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: inspector
+    image: rea:inspector
+    container_name: rea-inspector
+    profiles:
+      - inspector
+      - all
+    ports:
+      - "${REA_INSPECTOR_PORT:-6274}:6274"
+      - "${REA_SANDBOX_PORT:-6275}:6275"
+    environment:
+      - DANGEROUSLY_BIND_ALL_INTERFACES=true
+      - REA_JADX_MCP_JAR=/opt/jadx/jadx-headless-mcp-0.7.1-all.jar
+    volumes:
+      - ${REA_TARGETS_DIR:-../targets}:/workspace/targets:ro
+      - ${REA_OUTPUT_DIR:-../output}:/workspace/output:rw
+    networks:
+      - rea-network
+    restart: unless-stopped
+
+networks:
+  rea-network:
+    name: rea-network
+    driver: bridge
+
+volumes:
+  rea-config:
+    name: rea-config

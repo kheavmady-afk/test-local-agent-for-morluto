@@ -1,0 +1,139 @@
+{
+  "evidence_id": "ev_21d099a067275746420ae5d7414d8cd3f707137feab1ca42a334b70c274418ce",
+  "subject": {
+    "name": "SMIS-Parents-app-v0.1.apk",
+    "digest": {
+      "sha256": "43970fc9fb57f58955d4ef05ab253efa7e1a4c58d543856dc17a8e7175edc85b"
+    },
+    "format": "apk",
+    "architecture": null,
+    "local_path": "/workspace/targets/SMIS-Parents-app-v0.1.apk"
+  },
+  "provider": {
+    "id": "jadx",
+    "name": "JADX headless",
+    "version": "0.7.1"
+  },
+  "analysis_profile": null,
+  "predicate_type": "rea.analysis",
+  "operation": "inspect_android_package",
+  "parameters": {
+    "path": "/workspace/targets/SMIS-Parents-app-v0.1.apk"
+  },
+  "raw_result": {
+    "server": {
+      "name": "rea-jadx-bridge",
+      "version": "1"
+    },
+    "bridge_sha256": "5a5e8f6c32a7e18a3af5da2510c035e03aa787da79a3cbef46e751dd60c82913",
+    "jar_sha256": "6e5eacf500b64292bfb73c49797c1958f6ee44646e43e868039ae7feb573ff75",
+    "loaded": {
+      "state": "LOADED",
+      "apk_path": "/tmp/rea-android-PIfLLw/target.apk",
+      "class_count": 686,
+      "resource_count": 220,
+      "threads": 1,
+      "resources": "full"
+    },
+    "calls": [
+      {
+        "operation": "rea_jvm_status",
+        "input": {},
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"engine_reported_version\":\"0.7.1\",\"metadata_scope\":\"parsed_members\",\"max_heap_bytes\":8204058624,\"java_version\":\"17.0.20.1\",\"available_processors\":20}"
+            }
+          ],
+          "isError": false
+        }
+      },
+      {
+        "operation": "load_apk",
+        "input": {
+          "path": "/tmp/rea-android-PIfLLw/target.apk",
+          "threads": 1,
+          "resources": "full"
+        },
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"state\":\"LOADED\",\"apk_path\":\"/tmp/rea-android-PIfLLw/target.apk\",\"class_count\":686,\"raw_class_count\":686,\"resource_count\":220,\"load_duration_ms\":817,\"decompile_timeout_ms\":90000,\"threads\":1,\"code_cache_size\":64,\"resources\":\"full\"}"
+            }
+          ]
+        }
+      },
+      {
+        "operation": "get_app_info",
+        "input": {},
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"package\":\"com.cspp_mobiles.dev\",\"version_name\":\"1.0.0\",\"version_code\":\"4\",\"min_sdk\":\"24\",\"target_sdk\":\"36\",\"permissions\":[\"android.permission.INTERNET\",\"android.permission.POST_NOTIFICATIONS\",\"com.cspp_mobiles.dev.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION\"]}"
+            }
+          ]
+        }
+      },
+      {
+        "operation": "get_android_manifest",
+        "input": {},
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n    android:versionCode=\"4\"\n    android:versionName=\"1.0.0\"\n    android:compileSdkVersion=\"36\"\n    android:compileSdkVersionCodename=\"16\"\n    package=\"com.cspp_mobiles.dev\"\n    platformBuildVersionCode=\"36\"\n    platformBuildVersionName=\"16\">\n    <uses-sdk\n        android:minSdkVersion=\"24\"\n        android:targetSdkVersion=\"36\"/>\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <queries>\n        <intent>\n            <action android:name=\"android.intent.action.PROCESS_TEXT\"/>\n            <data android:mimeType=\"text/plain\"/>\n        </intent>\n        <intent>\n            <action android:name=\"android.intent.action.GET_CONTENT\"/>\n            <data android:mimeType=\"*/*\"/>\n        </intent>\n    </queries>\n    <permission\n        android:name=\"com.cspp_mobiles.dev.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION\"\n        android:protectionLevel=\"signature\"/>\n    <uses-permission android:name=\"com.cspp_mobiles.dev.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION\"/>\n    <application\n        android:label=\"@string/app_name\"\n        android:icon=\"@mipmap/ic_launcher\"\n        android:name=\"android.app.Application\"\n        android:extractNativeLibs=\"false\"\n        android:appComponentFactory=\"androidx.core.app.CoreComponentFactory\">\n        <activity\n            android:theme=\"@style/LaunchTheme\"\n            android:name=\"com.cspp_mobiles.MainActivity\"\n            android:exported=\"true\"\n            android:taskAffinity=\"\"\n            android:launchMode=\"singleTop\"\n            android:configChanges=\"fontScale|layoutDirection|density|smallestScreenSize|screenSize|uiMode|screenLayout|orientation|keyboardHidden|keyboard|locale\"\n            android:windowSoftInputMode=\"adjustResize\"\n            android:hardwareAccelerated=\"true\">\n            <meta-data\n                android:name=\"io.flutter.embedding.android.NormalTheme\"\n                android:resource=\"@style/NormalTheme\"/>\n            <intent-filter>\n                <action android:name=\"android.intent.action.MAIN\"/>\n                <category android:name=\"android.intent.category.LAUNCHER\"/>\n            </intent-filter>\n        </activity>\n        <meta-data\n            android:name=\"flutterEmbedding\"\n            android:value=\"2\"/>\n        <activity\n            android:theme=\"@android:style/Theme.NoTitleBar.Fullscreen\"\n            android:name=\"io.flutter.plugins.urllauncher.WebViewActivity\"\n            android:exported=\"false\"/>\n        <provider\n            android:name=\"androidx.startup.InitializationProvider\"\n            android:exported=\"false\"\n            android:authorities=\"com.cspp_mobiles.dev.androidx-startup\">\n            <meta-data\n                android:name=\"androidx.lifecycle.ProcessLifecycleInitializer\"\n                android:value=\"androidx.startup\"/>\n            <meta-data\n                android:name=\"androidx.profileinstaller.ProfileInstallerInitializer\"\n                android:value=\"androidx.startup\"/>\n        </provider>\n        <uses-library\n            android:name=\"androidx.window.extensions\"\n            android:required=\"false\"/>\n        <uses-library\n            android:name=\"androidx.window.sidecar\"\n            android:required=\"false\"/>\n        <receiver\n            android:name=\"androidx.profileinstaller.ProfileInstallReceiver\"\n            android:permission=\"android.permission.DUMP\"\n            android:enabled=\"true\"\n            android:exported=\"true\"\n            android:directBootAware=\"false\">\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.INSTALL_PROFILE\"/>\n            </intent-filter>\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.SKIP_FILE\"/>\n            </intent-filter>\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.SAVE_PROFILE\"/>\n            </intent-filter>\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.BENCHMARK_OPERATION\"/>\n            </intent-filter>\n        </receiver>\n    </application>\n</manifest>"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "normalized_result": {
+    "engine": {
+      "name": "jadx-headless-mcp",
+      "version": "0.7.1",
+      "artifact_sha256": "6e5eacf500b64292bfb73c49797c1958f6ee44646e43e868039ae7feb573ff75",
+      "source_revision": "5844800a486d2248fa949b74c9896285f5b54de2",
+      "worker_count": 1,
+      "heap_limit_mib": 7824
+    },
+    "package_name": "com.cspp_mobiles.dev",
+    "version_name": "1.0.0",
+    "version_code": "4",
+    "min_sdk": "24",
+    "target_sdk": "36",
+    "permissions": [
+      "android.permission.INTERNET",
+      "android.permission.POST_NOTIFICATIONS",
+      "com.cspp_mobiles.dev.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+    ],
+    "manifest": {
+      "status": "complete",
+      "text": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n    android:versionCode=\"4\"\n    android:versionName=\"1.0.0\"\n    android:compileSdkVersion=\"36\"\n    android:compileSdkVersionCodename=\"16\"\n    package=\"com.cspp_mobiles.dev\"\n    platformBuildVersionCode=\"36\"\n    platformBuildVersionName=\"16\">\n    <uses-sdk\n        android:minSdkVersion=\"24\"\n        android:targetSdkVersion=\"36\"/>\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <queries>\n        <intent>\n            <action android:name=\"android.intent.action.PROCESS_TEXT\"/>\n            <data android:mimeType=\"text/plain\"/>\n        </intent>\n        <intent>\n            <action android:name=\"android.intent.action.GET_CONTENT\"/>\n            <data android:mimeType=\"*/*\"/>\n        </intent>\n    </queries>\n    <permission\n        android:name=\"com.cspp_mobiles.dev.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION\"\n        android:protectionLevel=\"signature\"/>\n    <uses-permission android:name=\"com.cspp_mobiles.dev.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION\"/>\n    <application\n        android:label=\"@string/app_name\"\n        android:icon=\"@mipmap/ic_launcher\"\n        android:name=\"android.app.Application\"\n        android:extractNativeLibs=\"false\"\n        android:appComponentFactory=\"androidx.core.app.CoreComponentFactory\">\n        <activity\n            android:theme=\"@style/LaunchTheme\"\n            android:name=\"com.cspp_mobiles.MainActivity\"\n            android:exported=\"true\"\n            android:taskAffinity=\"\"\n            android:launchMode=\"singleTop\"\n            android:configChanges=\"fontScale|layoutDirection|density|smallestScreenSize|screenSize|uiMode|screenLayout|orientation|keyboardHidden|keyboard|locale\"\n            android:windowSoftInputMode=\"adjustResize\"\n            android:hardwareAccelerated=\"true\">\n            <meta-data\n                android:name=\"io.flutter.embedding.android.NormalTheme\"\n                android:resource=\"@style/NormalTheme\"/>\n            <intent-filter>\n                <action android:name=\"android.intent.action.MAIN\"/>\n                <category android:name=\"android.intent.category.LAUNCHER\"/>\n            </intent-filter>\n        </activity>\n        <meta-data\n            android:name=\"flutterEmbedding\"\n            android:value=\"2\"/>\n        <activity\n            android:theme=\"@android:style/Theme.NoTitleBar.Fullscreen\"\n            android:name=\"io.flutter.plugins.urllauncher.WebViewActivity\"\n            android:exported=\"false\"/>\n        <provider\n            android:name=\"androidx.startup.InitializationProvider\"\n            android:exported=\"false\"\n            android:authorities=\"com.cspp_mobiles.dev.androidx-startup\">\n            <meta-data\n                android:name=\"androidx.lifecycle.ProcessLifecycleInitializer\"\n                android:value=\"androidx.startup\"/>\n            <meta-data\n                android:name=\"androidx.profileinstaller.ProfileInstallerInitializer\"\n                android:value=\"androidx.startup\"/>\n        </provider>\n        <uses-library\n            android:name=\"androidx.window.extensions\"\n            android:required=\"false\"/>\n        <uses-library\n            android:name=\"androidx.window.sidecar\"\n            android:required=\"false\"/>\n        <receiver\n            android:name=\"androidx.profileinstaller.ProfileInstallReceiver\"\n            android:permission=\"android.permission.DUMP\"\n            android:enabled=\"true\"\n            android:exported=\"true\"\n            android:directBootAware=\"false\">\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.INSTALL_PROFILE\"/>\n            </intent-filter>\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.SKIP_FILE\"/>\n            </intent-filter>\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.SAVE_PROFILE\"/>\n            </intent-filter>\n            <intent-filter>\n                <action android:name=\"androidx.profileinstaller.action.BENCHMARK_OPERATION\"/>\n            </intent-filter>\n        </receiver>\n    </application>\n</manifest>",
+      "reported_total_bytes": null
+    },
+    "class_count": 686,
+    "resource_count": 220,
+    "signature_verification": "not_performed"
+  },
+  "confidence": "observed",
+  "authority": "shipped-artifact",
+  "environment": null,
+  "limitations": [
+    "Static decompiler observations do not establish runtime behavior; the APK is never executed.",
+    "Method signatures use provider display types; exact DEX descriptors and instruction offsets are unavailable. Overload indices are local to this engine and artifact.",
+    "Class inventories use parsed metadata before code generation, including synthetic members that may be omitted from decompiled source. Source positions remain unknown.",
+    "Manifest summary fields are extracted by the upstream engine; decoded XML is retained for verification. APK signatures, split APKs, native libraries and Android runtime capture are not verified by this provider."
+  ],
+  "relationship_coverage": null,
+  "locations": [
+    {
+      "kind": "artifact-path",
+      "path": "AndroidManifest.xml"
+    }
+  ],
+  "evidence_links": []
+}

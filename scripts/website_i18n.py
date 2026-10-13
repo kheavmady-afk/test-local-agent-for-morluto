@@ -307,7 +307,7 @@ def source_catalog(root):
         key = context, text
         if key not in entries:
             entry = polib.POEntry(msgctxt=context, msgid=text, msgstr="", flags=["python-brace-format"] if PLACEHOLDER.search(text) else [])
-            entry.comment = "\n".join(f"{{{key}}}: {re.sub(r'\s+', ' ', value)}" for key, value in slots.items())
+            entry.comment = "\n".join(f"{{{key}}}: " + re.sub(r'\s+', ' ', value) for key, value in slots.items())
             entries[key] = entry
             catalog.append(entry)
         occurrence = (reference, str(line))

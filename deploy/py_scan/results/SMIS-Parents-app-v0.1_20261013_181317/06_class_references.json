@@ -1,0 +1,130 @@
+{
+  "evidence_id": "ev_64582d6d465f60ae47797a4fe1c7b424e4572d661fbfae988c0477e7b0b1652b",
+  "subject": {
+    "name": "SMIS-Parents-app-v0.1.apk",
+    "digest": {
+      "sha256": "43970fc9fb57f58955d4ef05ab253efa7e1a4c58d543856dc17a8e7175edc85b"
+    },
+    "format": "apk",
+    "architecture": null,
+    "local_path": "/workspace/targets/SMIS-Parents-app-v0.1.apk"
+  },
+  "provider": {
+    "id": "jadx",
+    "name": "JADX headless",
+    "version": "0.7.1"
+  },
+  "analysis_profile": null,
+  "predicate_type": "rea.analysis",
+  "operation": "trace_android_references",
+  "parameters": {
+    "path": "/workspace/targets/SMIS-Parents-app-v0.1.apk",
+    "class_name": "com.cspp_mobiles.MainActivity"
+  },
+  "raw_result": {
+    "server": {
+      "name": "rea-jadx-bridge",
+      "version": "1"
+    },
+    "bridge_sha256": "5a5e8f6c32a7e18a3af5da2510c035e03aa787da79a3cbef46e751dd60c82913",
+    "jar_sha256": "6e5eacf500b64292bfb73c49797c1958f6ee44646e43e868039ae7feb573ff75",
+    "loaded": {
+      "state": "LOADED",
+      "apk_path": "/tmp/rea-android-mfRvs1/target.apk",
+      "class_count": 686,
+      "resource_count": 220,
+      "threads": 1,
+      "resources": "full"
+    },
+    "calls": [
+      {
+        "operation": "rea_jvm_status",
+        "input": {},
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"engine_reported_version\":\"0.7.1\",\"available_processors\":20,\"java_version\":\"17.0.20.1\",\"max_heap_bytes\":8204058624,\"metadata_scope\":\"parsed_members\"}"
+            }
+          ],
+          "isError": false
+        }
+      },
+      {
+        "operation": "load_apk",
+        "input": {
+          "path": "/tmp/rea-android-mfRvs1/target.apk",
+          "threads": 1,
+          "resources": "full"
+        },
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"state\":\"LOADED\",\"apk_path\":\"/tmp/rea-android-mfRvs1/target.apk\",\"class_count\":686,\"raw_class_count\":686,\"resource_count\":220,\"load_duration_ms\":938,\"decompile_timeout_ms\":90000,\"threads\":1,\"code_cache_size\":64,\"resources\":\"full\"}"
+            }
+          ]
+        }
+      },
+      {
+        "operation": "get_class_summary",
+        "input": {
+          "class_name": "com.cspp_mobiles.MainActivity"
+        },
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"field_count\":0,\"full_name\":\"com.cspp_mobiles.MainActivity\",\"name\":\"MainActivity\",\"inner_classes\":[],\"inner_class_count\":0,\"method_count\":1,\"methods\":[{\"is_constructor\":true,\"signature\":\"\\u003cinit\\u003e(): void\",\"def_pos\":0,\"name\":\"\\u003cinit\\u003e\"}],\"fields\":[]}"
+            }
+          ],
+          "isError": false
+        }
+      },
+      {
+        "operation": "get_xrefs_to_class",
+        "input": {
+          "class_name": "com.cspp_mobiles.MainActivity",
+          "limit": 2147483647,
+          "resolve_line": false
+        },
+        "response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"items\":[],\"total\":0,\"resolve_line\":false,\"target\":\"com.cspp_mobiles.MainActivity\",\"count\":0}"
+            }
+          ],
+          "isError": false
+        }
+      }
+    ]
+  },
+  "normalized_result": {
+    "engine": {
+      "name": "jadx-headless-mcp",
+      "version": "0.7.1",
+      "artifact_sha256": "6e5eacf500b64292bfb73c49797c1958f6ee44646e43e868039ae7feb573ff75",
+      "source_revision": "5844800a486d2248fa949b74c9896285f5b54de2",
+      "worker_count": 1,
+      "heap_limit_mib": 7824
+    },
+    "class_name": "com.cspp_mobiles.MainActivity",
+    "method_name": null,
+    "total": 0,
+    "references": [],
+    "coverage": "complete"
+  },
+  "confidence": "observed",
+  "authority": "shipped-artifact",
+  "environment": null,
+  "limitations": [
+    "Static decompiler observations do not establish runtime behavior; the APK is never executed.",
+    "Method signatures use provider display types; exact DEX descriptors and instruction offsets are unavailable. Overload indices are local to this engine and artifact.",
+    "Class inventories use parsed metadata before code generation, including synthetic members that may be omitted from decompiled source. Source positions remain unknown.",
+    "Manifest summary fields are extracted by the upstream engine; decoded XML is retained for verification. APK signatures, split APKs, native libraries and Android runtime capture are not verified by this provider."
+  ],
+  "relationship_coverage": null,
+  "locations": [],
+  "evidence_links": []
+}

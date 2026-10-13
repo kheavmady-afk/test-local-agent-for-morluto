@@ -1,0 +1,21 @@
+{
+  "models": [
+    {
+      "title": "Local Ollama Qwen2.5",
+      "provider": "ollama",
+      "model": "qwen2.5-coder:14b",
+      "apiBase": "http://localhost:11434"
+    }
+  ],
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "transport": {
+          "type": "stdio",
+          "command": "docker",
+          "args": ["exec", "-i", "rea-core", "rea", "mcp"]
+        }
+      }
+    ]
+  }
+}

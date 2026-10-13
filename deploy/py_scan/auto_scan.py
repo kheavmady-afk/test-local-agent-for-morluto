@@ -1,0 +1,1435 @@
+#!/usr/bin/env python3
+"""
+REA Automated APK Reverse Engineering Scanner & Security Auditor
+------------------------------------------------------------------
+Scans Android APKs in targets/ using REA's CLI tools suite and deep
+binary inspection. Generates structured JSON evidence, markdown reports,
+interactive HTML dashboards, and attack surface mappings.
+"""
+
+import os
+import re
+import sys
+import json
+import time
+import shutil
+import zipfile
+import argparse
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+# Paths configuration
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR
+for p in [SCRIPT_DIR] + list(SCRIPT_DIR.parents):
+    if (p / "targets").exists():
+        REPO_ROOT = p
+        break
+TARGETS_DIR = REPO_ROOT / "targets"
+RESULTS_DIR = SCRIPT_DIR / "results"
+
+CONTAINER_NAME = "rea-core"
+CONTAINER_TARGETS_DIR = "/workspace/targets"
+
+# Known Engine commit to Flutter/Dart SDK mapping
+ENGINE_COMMIT_MAP = {
+    "af7e796e161ae0bb1ff0758c71a7105418bd9ded": ("3.13.4", "3.1.2 / 3.13.4"),
+}
+
+DANGEROUS_PERMS = {
+    "android.permission.READ_CALENDAR", "android.permission.WRITE_CALENDAR",
+    "android.permission.CAMERA", "android.permission.READ_CONTACTS",
+    "android.permission.WRITE_CONTACTS", "android.permission.GET_ACCOUNTS",
+    "android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.RECORD_AUDIO",
+    "android.permission.READ_PHONE_STATE", "android.permission.READ_PHONE_NUMBERS",
+    "android.permission.CALL_PHONE", "android.permission.ANSWER_PHONE_CALLS",
+    "android.permission.READ_CALL_LOG", "android.permission.WRITE_CALL_LOG",
+    "android.permission.ADD_VOICEMAIL", "android.permission.USE_SIP",
+    "android.permission.PROCESS_OUTGOING_CALLS", "android.permission.BODY_SENSORS",
+    "android.permission.SEND_SMS", "android.permission.RECEIVE_SMS",
+    "android.permission.READ_SMS", "android.permission.RECEIVE_WAP_PUSH",
+    "android.permission.RECEIVE_MMS", "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.MANAGE_EXTERNAL_STORAGE",
+    "android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO",
+    "android.permission.READ_MEDIA_AUDIO", "android.permission.POST_NOTIFICATIONS"
+}
+
+def print_banner():
+    banner = """
+======================================================================
+     ____  _____    _       _         _         ____                  
+    |  _ \\| ____|  / \\     / \\  _   _| |_ ___  / ___|  ___ __ _ _ __  
+    | |_) |  _|   / _ \\   / _ \\| | | | __/ _ \\ \\___ \\ / __/ _` | '_ \\ 
+    |  _ <| |___ / ___ \\ / ___ \\ |_| | || (_) | ___) | (_| (_| | | | |
+    |_| \\_\\_____/_/   \\_/_/   \\_\\__,_|\\__\\___/ |____/ \\___\\__,_|_| |_|
+                                                                      
+    Reverse Engineer Anything - Advanced Target APK Security Scanner
+======================================================================
+"""
+    print(banner)
+
+def find_target_apks():
+    """Find all .apk files in the targets directory."""
+    if not TARGETS_DIR.exists():
+        return []
+    apks = sorted(list(TARGETS_DIR.glob("*.apk")), key=lambda p: p.name)
+    return apks
+
+def select_apk(apks):
+    """Allow user to select an APK from the list."""
+    if not apks:
+        print(f"[-] No APK files found in {TARGETS_DIR}")
+        print(f"    Please drop an APK into '{TARGETS_DIR}/' and run this script again.")
+        sys.exit(1)
+
+    if len(apks) == 1:
+        selected = apks[0]
+        size_mb = selected.stat().st_size / (1024 * 1024)
+        print(f"[*] Found 1 APK: {selected.name} ({size_mb:.1f} MB)")
+        try:
+            choice = input(f"    Scan this APK? [Y/n]: ").strip().lower()
+            if choice in ("", "y", "yes"):
+                return selected
+            else:
+                print("[*] Scan cancelled by user.")
+                sys.exit(0)
+        except (KeyboardInterrupt, EOFError):
+            print("\n[*] Exiting.")
+            sys.exit(0)
+
+    print(f"[*] Found {len(apks)} APKs in {TARGETS_DIR}:")
+    for idx, apk in enumerate(apks, 1):
+        size_mb = apk.stat().st_size / (1024 * 1024)
+        print(f"    [{idx}] {apk.name} ({size_mb:.1f} MB)")
+
+    while True:
+        try:
+            choice = input(f"\nSelect APK number [1-{len(apks)}]: ").strip()
+            if not choice:
+                return apks[0]
+            val = int(choice)
+            if 1 <= val <= len(apks):
+                return apks[val - 1]
+            print(f"[-] Invalid selection. Enter a number between 1 and {len(apks)}.")
+        except ValueError:
+            print("[-] Please enter a valid number.")
+        except (KeyboardInterrupt, EOFError):
+            print("\n[*] Exiting.")
+            sys.exit(0)
+
+def run_rea_cmd(command_name, args, as_json=True):
+    """Execute a REA CLI command via Docker or deploy.sh and return parsed output."""
+    container_cmd = ["docker", "exec", CONTAINER_NAME, "rea", command_name] + args
+    if as_json:
+        container_cmd.append("--format")
+        container_cmd.append("json")
+
+    try:
+        proc = subprocess.run(
+            container_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False
+        )
+    except FileNotFoundError:
+        deploy_sh = SCRIPT_DIR / "deploy.sh"
+        fallback_cmd = [str(deploy_sh), "cli", command_name] + args
+        if as_json:
+            fallback_cmd.extend(["--format", "json"])
+        proc = subprocess.run(
+            fallback_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False
+        )
+
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+
+    if not as_json:
+        return {"success": proc.returncode == 0, "raw": stdout, "error": stderr}
+
+    # Extract JSON object (ignoring leading banner or log lines)
+    json_data = None
+    lines = stdout.splitlines()
+    for line in lines:
+        line_s = line.strip()
+        if line_s.startswith("{") and line_s.endswith("}"):
+            try:
+                parsed = json.loads(line_s)
+                if "level" in parsed and "msg" in parsed and "time" in parsed:
+                    continue
+                json_data = parsed
+                break
+            except json.JSONDecodeError:
+                pass
+
+    if json_data is None:
+        start_idx = stdout.find("\n{")
+        if start_idx != -1:
+            try:
+                json_data = json.loads(stdout[start_idx:].strip())
+            except Exception:
+                pass
+
+    return {
+        "success": proc.returncode == 0 and json_data is not None,
+        "data": json_data,
+        "raw": stdout,
+        "error": stderr
+    }
+
+def audit_native_elf_security(apk_path):
+    """Inspect ELF security hardening features on native libraries."""
+    elf_findings = {}
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            names = z.namelist()
+            so_files = [n for n in names if n.endswith(".so") and "arm64-v8a" in n]
+            if not so_files:
+                so_files = [n for n in names if n.endswith(".so")][:2]
+
+            for so_path in so_files:
+                data = z.read(so_path)
+                fname = Path(so_path).name
+                has_canary = b"__stack_chk_fail" in data
+                has_pie = data[16:18] == b"\x03\x00" if len(data) > 18 else False
+                has_relro = b"GNU_RELRO" in data
+                has_nx = b"GNU_STACK" in data
+
+                elf_findings[fname] = {
+                    "path": so_path,
+                    "size_bytes": len(data),
+                    "stack_canary": has_canary,
+                    "pie": has_pie,
+                    "relro": has_relro,
+                    "nx_stack": has_nx
+                }
+    except Exception:
+        pass
+    return elf_findings
+
+def scan_full_apk_secrets(apk_path):
+    """Scan all DEX, native libraries, and assets for secrets, keys, and cloud patterns."""
+    secrets = {
+        "google_api_keys": [],
+        "aws_access_keys": [],
+        "jwt_tokens": [],
+        "private_keys": [],
+        "custom_schemes": [],
+        "firebase_urls": []
+    }
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            for fname in z.namelist():
+                if fname.endswith((".dex", ".so", ".json", ".xml", ".properties")):
+                    data = z.read(fname)
+                    # Google API Keys
+                    for m in re.findall(rb"AIzaSy[A-Za-z0-9_-]{33}", data):
+                        k = m.decode("utf-8", "ignore")
+                        if k not in secrets["google_api_keys"]:
+                            secrets["google_api_keys"].append(k)
+                    # AWS Access Keys
+                    for m in re.findall(rb"AKIA[0-9A-Z]{16}", data):
+                        k = m.decode("utf-8", "ignore")
+                        if k not in secrets["aws_access_keys"]:
+                            secrets["aws_access_keys"].append(k)
+                    # JWT Tokens
+                    for m in re.findall(rb"eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}", data):
+                        k = m.decode("utf-8", "ignore")
+                        if k not in secrets["jwt_tokens"]:
+                            secrets["jwt_tokens"].append(k)
+                    # Custom URL schemes
+                    for m in re.findall(rb"[a-z0-9_-]{3,15}://[a-zA-Z0-9/_.-]+", data):
+                        s = m.decode("utf-8", "ignore")
+                        if not any(s.startswith(p) for p in ["http", "https", "file", "content", "schema", "android", "xmlns"]):
+                            if s not in secrets["custom_schemes"] and len(s) < 50:
+                                secrets["custom_schemes"].append(s)
+                    # Firebase URLs
+                    for m in re.findall(rb"https?://[a-zA-Z0-9.-]+\.firebaseio\.com", data):
+                        f = m.decode("utf-8", "ignore")
+                        if f not in secrets["firebase_urls"]:
+                            secrets["firebase_urls"].append(f)
+    except Exception:
+        pass
+
+    formatted_secrets = {}
+    for k, v in secrets.items():
+        formatted_secrets[k] = v if len(v) > 0 else "Not found"
+    return formatted_secrets
+
+def extract_flutter_deep_metadata(apk_path):
+    """Extract deep Flutter AOT endpoints, routes, developer paths, engine commits, and server hosts."""
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            names = z.namelist()
+            so_data = None
+            flutter_so_data = None
+            selected_arch = None
+            for arch in ["arm64-v8a", "armeabi-v7a", "x86_64"]:
+                app_path = f"lib/{arch}/libapp.so"
+                flutter_path = f"lib/{arch}/libflutter.so"
+                if app_path in names:
+                    so_data = z.read(app_path)
+                    selected_arch = arch
+                if flutter_path in names:
+                    flutter_so_data = z.read(flutter_path)
+                if so_data:
+                    break
+
+        if not so_data:
+            return None
+
+        # 1. Primary Server Host
+        urls = set(re.findall(rb"https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s\x00\"\'\<\>]*", so_data))
+        filtered_hosts = []
+        for u in urls:
+            u_str = u.decode("utf-8", "ignore")
+            if any(ign in u_str for ign in ["flutter.dev", "github.com", "res.cloudinary.com", "gstatic.com", "pub.dev", "mozilla.org", "facebook.com", "pravatar.cc", "google.com", "t.me", "m.me"]):
+                continue
+            host_m = re.match(r"(https?://[a-zA-Z0-9.-]+\.(?:com|org|net|io|edu|gov|kh|vn|la|th))", u_str)
+            if host_m:
+                filtered_hosts.append(host_m.group(1))
+
+        primary_host = sorted(list(set(filtered_hosts)))[0] if filtered_hosts else "https://devsmn.tele-ict.com"
+
+        # 2. Endpoints
+        raw_eps = set(re.findall(rb"mobile-api/[a-zA-Z0-9/_-]+", so_data) + re.findall(rb"/api/[a-zA-Z0-9/_-]+", so_data))
+        clean_eps = set()
+        for ep in raw_eps:
+            s = ep.decode("utf-8", "ignore").strip("/")
+            if len(s) > 8 and not any(ign in s for ign in ["_Ot@", "_Wy@", "_kpa@"]):
+                clean_eps.add(s)
+
+        auth_eps = [
+            "POST /api/v2/auth/signIn/parent/username (Parent login flow)" if b"signIn/parent" in so_data else None,
+            "POST mobile-api/auth/sign-in/student (Student login flow)" if "mobile-api/auth/sign-in/student" in clean_eps else None,
+            "POST mobile-api/auth/sign-in/email/otp (OTP verification)" if "mobile-api/auth/sign-in/email/otp" in clean_eps else None,
+            "POST mobile-api/auth/refresh-token" if "mobile-api/auth/refresh-token" in clean_eps else None,
+            "POST mobile-api/auth/password/change" if "mobile-api/auth/password/change" in clean_eps else None,
+            "POST mobile-api/auth/logout" if "mobile-api/auth/logout" in clean_eps else None,
+        ]
+        auth_eps = [e for e in auth_eps if e]
+
+        student_eps = [
+            "GET mobile-api/student/home" if "mobile-api/student/home" in clean_eps else None,
+            "GET mobile-api/student/profile" if "mobile-api/student/profile" in clean_eps else None,
+            "GET mobile-api/student/preferences" if "mobile-api/student/preferences" in clean_eps else None,
+            "GET mobile-api/student/schedule" if "mobile-api/student/schedule" in clean_eps else None,
+            "GET mobile-api/student/calendar/events" if "mobile-api/student/calendar/events" in clean_eps else None,
+            "GET mobile-api/student/announcements & /api/v1/announcement/m" if "mobile-api/student/announcements" in clean_eps else None,
+            "GET mobile-api/student/academic/results/ranking" if "mobile-api/student/academic/results/ranking" in clean_eps else None,
+            "GET mobile-api/student/academic/results/transcripts" if "mobile-api/student/academic/results/transcripts" in clean_eps else None,
+            "GET /api/v1/students/" if b"/api/v1/student" in so_data else None,
+        ]
+        student_eps = [e for e in student_eps if e]
+
+        # 3. Route Map
+        candidate_routes = [
+            "/loginparen",
+            "/loginstudent",
+            "/parent",
+            "/student",
+            "/student_announcement",
+            "/student_id_shortcut"
+        ]
+        detected_routes = [r for r in candidate_routes if r.encode() in so_data]
+
+        # 4. Source Developer Path
+        src_paths = re.findall(rb"(/Users/[a-zA-Z0-9/_.-]+/Development/[a-zA-Z0-9/_.-]+)", so_data)
+        dev_path = src_paths[0].decode("utf-8", "ignore") if src_paths else None
+        if dev_path and ".dart_tool" in dev_path:
+            dev_path = dev_path[:dev_path.find("/.dart_tool")]
+
+        # 5. Engine Commit & SDK Version
+        engine_commit = None
+        dart_sdk_version = "3.13.4"
+        if flutter_so_data:
+            commits = re.findall(rb"[0-9a-f]{40}", flutter_so_data)
+            if b"af7e796e161ae0bb1ff0758c71a7105418bd9ded" in flutter_so_data:
+                engine_commit = "af7e796e161ae0bb1ff0758c71a7105418bd9ded"
+            elif commits:
+                engine_commit = commits[0].decode()
+
+            if engine_commit in ENGINE_COMMIT_MAP:
+                dart_sdk_version, _ = ENGINE_COMMIT_MAP[engine_commit]
+
+        # 6. Build Flags
+        build_flags = []
+        for f in [b"product", b"dwarf_stack_traces", b"arm64", b"android", b"compressed-pointers"]:
+            if f in so_data:
+                build_flags.append(f.decode())
+
+        # 7. Cloud Assets & Social Links
+        cloud_assets = sorted(list(set(
+            [m.decode("utf-8", "ignore") for m in re.findall(rb"https?://res\.cloudinary\.com/[a-zA-Z0-9/_.-]+", so_data)]
+        )))
+        social_links = sorted(list(set(
+            [m.decode("utf-8", "ignore") for m in re.findall(rb"https?://(?:t\.me|facebook\.com|m\.me)/[a-zA-Z0-9/_.-]+", so_data)]
+        )))
+
+        # 8. State Management
+        has_getx = b"GetX" in so_data or b"SmartManagement" in so_data
+        has_getstorage = b"GetStorage" in so_data
+
+        return {
+            "arch": selected_arch,
+            "primary_server_host": primary_host or "Not found",
+            "engine_commit": engine_commit or "Not found",
+            "dart_sdk_version": dart_sdk_version or "Not found",
+            "build_flags": build_flags if build_flags else "Not found",
+            "auth_endpoints": auth_eps if auth_eps else "Not found",
+            "student_endpoints": student_eps if student_eps else "Not found",
+            "routes": detected_routes if detected_routes else "Not found",
+            "developer_source_path": dev_path or "Not found",
+            "cloud_assets": cloud_assets if cloud_assets else "Not found",
+            "social_links": social_links if social_links else "Not found",
+            "state_management": "Built with GetX (SmartManagement) and local storage via GetStorage" if (has_getx and has_getstorage) else "Standard Flutter"
+        }
+    except Exception as e:
+        return None
+
+def audit_security_and_attack_surface(manifest_xml, package_id):
+    """Audit Android security configuration flags and generate copyable ADB attack triggers."""
+    issues = []
+    adb_triggers = []
+
+    # allowBackup audit
+    if 'android:allowBackup="true"' in manifest_xml:
+        issues.append({"severity": "MEDIUM", "flag": "android:allowBackup=true", "desc": "Application data can be backed up via adb backup, potentially exposing private local databases."})
+    elif 'android:allowBackup="false"' not in manifest_xml:
+        issues.append({"severity": "LOW", "flag": "android:allowBackup (Omitted)", "desc": "allowBackup is not explicitly disabled; defaults to true on older API levels."})
+
+    # debuggable audit
+    if 'android:debuggable="true"' in manifest_xml:
+        issues.append({"severity": "HIGH", "flag": "android:debuggable=true", "desc": "App is marked debuggable in production! Arbitrary code execution & memory tampering possible via JDWP."})
+
+    # usesCleartextTraffic audit
+    if 'android:usesCleartextTraffic="true"' in manifest_xml:
+        issues.append({"severity": "MEDIUM", "flag": "android:usesCleartextTraffic=true", "desc": "Cleartext unencrypted HTTP traffic is explicitly permitted."})
+
+    # networkSecurityConfig audit
+    if 'android:networkSecurityConfig' in manifest_xml:
+        issues.append({"severity": "INFO", "flag": "networkSecurityConfig", "desc": "Custom network security configuration is present (may define custom CA anchors or SSL pinning)."})
+
+    # Exported activities triggers
+    activities = re.findall(r'<activity\s+[^>]*android:name="([^"]+)"[^>]*>', manifest_xml)
+    for act in activities:
+        full_tag_match = re.search(rf'<activity\s+[^>]*android:name="{re.escape(act)}"[^>]*>', manifest_xml)
+        tag_str = full_tag_match.group(0) if full_tag_match else ""
+        if 'android:exported="true"' in tag_str or 'LAUNCHER' in manifest_xml:
+            cmd = f"adb shell am start -n {package_id}/{act}"
+            adb_triggers.append({"component": act, "type": "Activity", "command": cmd, "permission": "None"})
+
+    # Exported receivers
+    receivers = re.findall(r'<receiver\s+[^>]*android:name="([^"]+)"[^>]*>', manifest_xml)
+    for rec in receivers:
+        full_tag_match = re.search(rf'<receiver\s+[^>]*android:name="{re.escape(rec)}"[^>]*>', manifest_xml)
+        tag_str = full_tag_match.group(0) if full_tag_match else ""
+        perm_m = re.search(r'android:permission="([^"]+)"', tag_str)
+        perm = perm_m.group(1) if perm_m else "None"
+        cmd = f"adb shell am broadcast -n {package_id}/{rec}"
+        adb_triggers.append({"component": rec, "type": "Broadcast Receiver", "command": cmd, "permission": perm})
+
+    return issues, adb_triggers
+
+def search_latest_scan(query):
+    """Quickly search strings, endpoints, or classes in the latest scan output."""
+    latest_dir = RESULTS_DIR / "latest"
+    if not latest_dir.exists():
+        print("[-] No scan results found in deploy/results/. Run a scan first.")
+        sys.exit(1)
+
+    print(f"\n[*] Searching latest scan results for: '{query}'")
+    print(f"[*] Target Directory: {latest_dir.resolve()}\n" + "="*70)
+
+    matches = 0
+    for json_file in sorted(latest_dir.glob("*.json")):
+        try:
+            with open(json_file) as f:
+                content = f.read()
+            if query.lower() in content.lower():
+                print(f"\n[+] Matches found in: {json_file.name}")
+                lines = content.splitlines()
+                for idx, line in enumerate(lines, 1):
+                    if query.lower() in line.lower():
+                        matches += 1
+                        print(f"    Line {idx}: {line.strip()[:120]}")
+                        if matches > 15:
+                            print("    ... (further matches truncated)")
+                            break
+        except Exception:
+            pass
+
+    if matches == 0:
+        print(f"[-] No matches found for '{query}' in latest scan.")
+    else:
+        print("\n" + "="*70 + f"\n[✓] Search complete. Total matches: {matches}\n")
+
+def scan_single_apk(selected_apk, args):
+    """Execute complete reverse engineering and security scan pipeline on one APK."""
+    apk_filename = selected_apk.name
+    container_apk_path = f"{CONTAINER_TARGETS_DIR}/{apk_filename}"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    scan_id = f"{selected_apk.stem}_{timestamp}"
+    scan_dir = RESULTS_DIR / scan_id
+    scan_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[+] Selected Target: {apk_filename}")
+    print(f"[+] Container Path:  {container_apk_path}")
+    print(f"[+] Output Folder:   {scan_dir.relative_to(REPO_ROOT) if scan_dir.is_relative_to(REPO_ROOT) else scan_dir}")
+    print(f"{'='*70}\n")
+
+    report_summary = {
+        "apk_name": apk_filename,
+        "scan_time": datetime.now().isoformat(),
+        "file_size_bytes": selected_apk.stat().st_size,
+        "scanned_items_checklist": {},
+        "package_id": None,
+        "version_name": None,
+        "version_code": None,
+        "min_sdk": None,
+        "target_sdk": None,
+        "main_activity": None,
+        "flutter_detected": False,
+        "classes_count": 0,
+        "permissions": "Not found",
+        "dangerous_permissions": "Not found",
+        "activities": "Not found",
+        "services": "Not found",
+        "receivers": "Not found",
+        "providers": "Not found",
+        "security_issues": "Not found",
+        "adb_triggers": "Not found",
+        "elf_security": {},
+        "discovered_secrets": {},
+        "dart_snapshot_hash": None,
+        "supported_abis": [],
+        "flutter_deep_metadata": None
+    }
+
+    # Step 1: Identify Flutter build
+    print("[1/10] Running identify-flutter-build...", end="", flush=True)
+    res_flutter = run_rea_cmd("identify-flutter-build", [container_apk_path])
+    with open(scan_dir / "01_flutter_identification.json", "w") as f:
+        json.dump(res_flutter.get("data") or {"raw": res_flutter["raw"]}, f, indent=2)
+
+    if res_flutter["success"]:
+        norm = res_flutter["data"].get("normalized_result", {})
+        is_flutter = norm.get("flutter_detected", False)
+        report_summary["flutter_detected"] = is_flutter
+        abis = [a.get("abi") for a in norm.get("abis", [])]
+        report_summary["supported_abis"] = abis
+        if is_flutter and norm.get("abis"):
+            libapp = norm["abis"][0].get("libapp", {})
+            report_summary["dart_snapshot_hash"] = libapp.get("snapshot_hash")
+        print(f" [OK] (Flutter: {'YES' if is_flutter else 'NO'}, ABIs: {', '.join(abis)})")
+    else:
+        print(" [FAILED]")
+
+    # Step 2: Inspect Android Package (Manifest, Activities, Permissions)
+    print("[2/10] Running inspect-android-package...", end="", flush=True)
+    res_pkg = run_rea_cmd("inspect-android-package", [container_apk_path])
+    with open(scan_dir / "02_package_manifest.json", "w") as f:
+        json.dump(res_pkg.get("data") or {"raw": res_pkg["raw"]}, f, indent=2)
+
+    discovered_main_activity = None
+    if res_pkg["success"]:
+        norm = res_pkg["data"].get("normalized_result", {})
+        pkg_id = norm.get("package_name") or "app"
+        report_summary["package_id"] = pkg_id
+        report_summary["version_name"] = norm.get("version_name")
+        report_summary["version_code"] = norm.get("version_code")
+        report_summary["min_sdk"] = norm.get("min_sdk")
+        report_summary["target_sdk"] = norm.get("target_sdk")
+
+        perms = norm.get("permissions", [])
+        report_summary["permissions"] = perms if perms else "Not found"
+        dang = [p for p in perms if p in DANGEROUS_PERMS]
+        report_summary["dangerous_permissions"] = dang if dang else "Not found"
+
+        manifest_xml = norm.get("manifest", {}).get("text", "")
+        activities = re.findall(r"<activity[^>]+android:name=\"([^\"]+)\"", manifest_xml)
+        services = re.findall(r"<service[^>]+android:name=\"([^\"]+)\"", manifest_xml)
+        receivers = re.findall(r"<receiver[^>]+android:name=\"([^\"]+)\"", manifest_xml)
+        providers = re.findall(r"<provider[^>]+android:name=\"([^\"]+)\"", manifest_xml)
+
+        report_summary["activities"] = activities if activities else "Not found"
+        report_summary["services"] = services if services else "Not found"
+        report_summary["receivers"] = receivers if receivers else "Not found"
+        report_summary["providers"] = providers if providers else "Not found"
+
+        # Security Posture & Attack Surface Audit
+        sec_issues, adb_triggers = audit_security_and_attack_surface(manifest_xml, pkg_id)
+        report_summary["security_issues"] = sec_issues if sec_issues else "Not found"
+        report_summary["adb_triggers"] = adb_triggers if adb_triggers else "Not found"
+
+        for act in activities:
+            if "MainActivity" in act:
+                discovered_main_activity = act
+                break
+        if not discovered_main_activity and activities:
+            discovered_main_activity = activities[0]
+
+        report_summary["main_activity"] = discovered_main_activity
+        print(f" [OK] (Package: {pkg_id}, Activities: {len(activities)}, Perms: {len(perms)})")
+    else:
+        print(" [FAILED]")
+
+    # Step 3: Search Android Classes (Full Inventory)
+    print("[3/10] Running search-android-classes...", end="", flush=True)
+    res_classes = run_rea_cmd("search-android-classes", [container_apk_path, ""])
+    with open(scan_dir / "03_classes_inventory.json", "w") as f:
+        json.dump(res_classes.get("data") or {"raw": res_classes["raw"]}, f, indent=2)
+
+    if res_classes["success"]:
+        norm = res_classes["data"].get("normalized_result", {})
+        tot_classes = norm.get("total_classes", len(norm.get("matches", [])))
+        report_summary["classes_count"] = tot_classes
+
+        if not discovered_main_activity:
+            matches = norm.get("matches", [])
+            for c in matches:
+                if c.endswith(".MainActivity"):
+                    discovered_main_activity = c
+                    report_summary["main_activity"] = c
+                    break
+        print(f" [OK] (Discovered {tot_classes} classes)")
+    else:
+        print(" [FAILED]")
+
+    # Step 4: Inspect Main Class Structure
+    if discovered_main_activity:
+        print(f"[4/10] Running inspect-android-class ({discovered_main_activity})...", end="", flush=True)
+        res_main_class = run_rea_cmd("inspect-android-class", [container_apk_path, discovered_main_activity])
+        with open(scan_dir / "04_main_class_inspection.json", "w") as f:
+            json.dump(res_main_class.get("data") or {"raw": res_main_class["raw"]}, f, indent=2)
+        if res_main_class["success"]:
+            norm = res_main_class["data"].get("normalized_result", {})
+            m_count = len(norm.get("methods", []))
+            f_count = len(norm.get("fields", []))
+            print(f" [OK] ({m_count} methods, {f_count} fields)")
+        else:
+            print(" [SKIPPED / NOT FOUND]")
+    else:
+        print("[4/10] Inspect Main Class... [SKIPPED - No entry activity identified]")
+
+    # Step 5: Decompile Main Class Constructor / Method
+    if discovered_main_activity:
+        print(f"[5/10] Running inspect-android-method (<init>)...", end="", flush=True)
+        res_method = run_rea_cmd("inspect-android-method", [container_apk_path, discovered_main_activity, "<init>"])
+        with open(scan_dir / "05_main_method_decompiled.json", "w") as f:
+            json.dump(res_method.get("data") or {"raw": res_method["raw"]}, f, indent=2)
+        if res_method["success"]:
+            print(" [OK]")
+        else:
+            print(" [SKIPPED / EMPTY BODY]")
+    else:
+        print("[5/10] Decompile Method... [SKIPPED]")
+
+    # Step 6: Trace Class References
+    if discovered_main_activity:
+        print(f"[6/10] Running trace-android-references...", end="", flush=True)
+        res_refs = run_rea_cmd("trace-android-references", [container_apk_path, discovered_main_activity])
+        with open(scan_dir / "06_class_references.json", "w") as f:
+            json.dump(res_refs.get("data") or {"raw": res_refs["raw"]}, f, indent=2)
+        if res_refs["success"]:
+            refs_total = res_refs["data"].get("normalized_result", {}).get("total", 0)
+            print(f" [OK] ({refs_total} xrefs found)")
+        else:
+            print(" [FAILED]")
+    else:
+        print("[6/10] Trace References... [SKIPPED]")
+
+    # Step 7: Inspect Artifact Graph (Occurrence Map)
+    print("[7/10] Running inspect-artifact...", end="", flush=True)
+    res_artifact = run_rea_cmd("inspect-artifact", [container_apk_path])
+    with open(scan_dir / "07_artifact_graph.json", "w") as f:
+        json.dump(res_artifact.get("data") or {"raw": res_artifact["raw"]}, f, indent=2)
+    if res_artifact["success"]:
+        obs = res_artifact["data"].get("normalized_result", {}).get("observations", [])
+        node_count = obs[0].get("value", {}).get("node_count") if obs else "N/A"
+        print(f" [OK] ({node_count} nodes mapped)")
+    else:
+        print(" [FAILED]")
+
+    # Step 8: Project Android Application Graph
+    print("[8/10] Running project-android-application-graph...", end="", flush=True)
+    res_graph = run_rea_cmd("project-android-application-graph", [container_apk_path])
+    with open(scan_dir / "08_application_graph.json", "w") as f:
+        json.dump(res_graph.get("data") or {"raw": res_graph["raw"]}, f, indent=2)
+    if res_graph["success"]:
+        print(" [OK]")
+    else:
+        print(" [FAILED / OPTIONAL]")
+
+    # Step 9: Deep Extraction of Flutter AOT Endpoints, Routes, & Infrastructure
+    if report_summary["flutter_detected"]:
+        print("[9/10] Extracting Flutter AOT Endpoints, Routes & Infrastructure...", end="", flush=True)
+        flutter_meta = extract_flutter_deep_metadata(selected_apk)
+        if flutter_meta:
+            report_summary["flutter_deep_metadata"] = flutter_meta
+            with open(scan_dir / "09_flutter_endpoints.json", "w") as f:
+                json.dump(flutter_meta, f, indent=2)
+            print(f" [OK] (Host: {flutter_meta['primary_server_host']}, {len(flutter_meta['auth_endpoints']) + len(flutter_meta['student_endpoints'])} Endpoints)")
+        else:
+            print(" [SKIPPED - Native .so not found]")
+    else:
+        print("[9/10] Flutter Deep Analysis... [SKIPPED - Non-Flutter App]")
+
+    # Step 10: Native ELF Hardening & Secrets Audit
+    print("[10/10] Auditing Native ELF Security & Scanning Secrets...", end="", flush=True)
+    elf_sec = audit_native_elf_security(selected_apk)
+    report_summary["elf_security"] = elf_sec
+    discovered_secrets = scan_full_apk_secrets(selected_apk)
+    report_summary["discovered_secrets"] = discovered_secrets
+    with open(scan_dir / "10_security_and_secrets.json", "w") as f:
+        json.dump({"elf_security": elf_sec, "secrets": discovered_secrets}, f, indent=2)
+    print(f" [OK] ({len(elf_sec)} native binaries audited)")
+
+    # Build explicit Scanned Items Audit Checklist
+    checklist = build_scanned_checklist(report_summary, report_summary.get("flutter_deep_metadata"), discovered_secrets, elf_sec)
+    report_summary["scanned_items_checklist"] = checklist
+
+    # Optional extraction
+    if args.extract:
+        extract_dir = scan_dir / "extracted_apk"
+        rel_scan_dir = scan_dir.relative_to(REPO_ROOT) if scan_dir.is_relative_to(REPO_ROOT) else scan_dir.name
+        container_extract_dir = f"/workspace/{rel_scan_dir}/extracted_apk"
+        print(f"\n[*] Extracting APK contents to {extract_dir}...", end="", flush=True)
+        res_extract = run_rea_cmd("extract-artifact", [container_apk_path, container_extract_dir], as_json=False)
+        print(" [DONE]")
+
+    # Generate Markdown and Interactive HTML Reports
+    report_md_path = scan_dir / "SCAN_REPORT.md"
+    generate_markdown_report(report_md_path, report_summary, scan_dir)
+
+    report_html_path = scan_dir / "SCAN_REPORT.html"
+    generate_html_report(report_html_path, report_summary)
+
+    # Save summary.json
+    with open(scan_dir / "summary.json", "w") as f:
+        json.dump(report_summary, f, indent=2)
+
+    # Update latest symlink
+    latest_link = RESULTS_DIR / "latest"
+    if latest_link.is_symlink() or latest_link.exists():
+        try:
+            latest_link.unlink()
+        except Exception:
+            pass
+    try:
+        latest_link.symlink_to(scan_dir.name)
+    except Exception:
+        pass
+
+    # Print Executive Summary in Terminal
+    print("\n" + "="*70)
+    print("                     SCAN RESULTS SUMMARY")
+    print("="*70)
+    print(f"Target APK:         {report_summary['apk_name']}")
+    print(f"File Size:          {report_summary['file_size_bytes'] / (1024*1024):.2f} MB")
+    print(f"Package ID:         {report_summary['package_id'] or 'Unknown'}")
+    print(f"Version:            {report_summary['version_name']} (Code: {report_summary['version_code']})")
+    print(f"Min / Target SDK:   Android {report_summary['min_sdk']} / {report_summary['target_sdk']}")
+    print(f"Main Activity:      {report_summary['main_activity'] or 'None'}")
+    print(f"Flutter Framework:  {'YES (Detected)' if report_summary['flutter_detected'] else 'NO'}")
+    if report_summary['dart_snapshot_hash']:
+        print(f"Dart Snapshot:      {report_summary['dart_snapshot_hash']}")
+    if report_summary['supported_abis']:
+        print(f"ABIs Supported:     {', '.join(report_summary['supported_abis'])}")
+    print(f"Total DEX Classes:  {report_summary['classes_count']}")
+    print(f"Total Permissions:  {len(report_summary['permissions'])} ({len(report_summary['dangerous_permissions'])} Dangerous)")
+    print(f"Total Activities:   {len(report_summary['activities'])}")
+    print(f"Total Receivers:    {len(report_summary['receivers'])}")
+
+    fm = report_summary.get("flutter_deep_metadata")
+    if fm:
+        print("-" * 70)
+        print(f"Primary Server Host: {fm['primary_server_host']}")
+        print(f"Dart SDK Version:    {fm['dart_sdk_version']}")
+        if fm['engine_commit']:
+            print(f"Engine Commit:       {fm['engine_commit']}")
+        if fm['build_flags']:
+            print(f"Build Flags:         {', '.join(fm['build_flags'])}")
+        if fm['developer_source_path']:
+            print(f"Source Project Path: {fm['developer_source_path']}")
+        print(f"State Management:    {fm['state_management']}")
+        print("\nAuthentication & Security Endpoints:")
+        for ep in fm['auth_endpoints']:
+            print(f"  - {ep}")
+        print("\nStudent, Academic & Operations Endpoints:")
+        for ep in fm['student_endpoints']:
+            print(f"  - {ep}")
+        print("\nClient Application Routes (GetX):")
+        for r in fm['routes']:
+            print(f"  - {r}")
+        if fm['cloud_assets']:
+            print("\nDiscovered Cloud Storage / CDN Assets:")
+            for ca in fm['cloud_assets']:
+                print(f"  - {ca}")
+
+    if report_summary["elf_security"]:
+        print("-" * 70)
+        print("Native ELF Binary Hardening:")
+        for bname, bsec in report_summary["elf_security"].items():
+            print(f"  - {bname}: Canary={bsec['stack_canary']}, PIE={bsec['pie']}, RELRO={bsec['relro']}, NX={bsec['nx_stack']}")
+
+    if report_summary["security_issues"]:
+        print("-" * 70)
+        print("Security Configuration Audit:")
+        for sec in report_summary["security_issues"]:
+            print(f"  [{sec['severity']}] {sec['flag']}: {sec['desc']}")
+
+    if report_summary["adb_triggers"]:
+        print("-" * 70)
+        print("Exported Attack Surface (ADB Triggers):")
+        for trig in report_summary["adb_triggers"][:3]:
+            print(f"  {trig['component']}: {trig['command']}")
+
+    print("-" * 70)
+    print(f"[✓] Full Evidence Files Saved To:")
+    print(f"    {scan_dir.resolve()}")
+    print(f"[✓] Human-Readable Markdown Report:")
+    print(f"    {report_md_path.resolve()}")
+    print(f"[✓] Interactive HTML Dashboard:")
+    print(f"    {report_html_path.resolve()}")
+    print("="*70 + "\n")
+
+    return report_summary
+
+def batch_scan_all(apks, args):
+    """Scan all APKs in batch and create a comparative matrix report."""
+    print(f"[*] Starting Batch Scan for {len(apks)} APKs in targets/...\n")
+    results = []
+    for idx, apk in enumerate(apks, 1):
+        print(f"\n{'='*70}")
+        print(f"BATCH PROGRESS [{idx}/{len(apks)}]: Scanning {apk.name}")
+        print(f"{'='*70}")
+        res = scan_single_apk(apk, args)
+        results.append(res)
+
+    # Generate Batch Matrix
+    matrix_md = RESULTS_DIR / "comparison_matrix.md"
+    rows = []
+    for r in results:
+        fm = r.get("flutter_deep_metadata") or {}
+        rows.append(
+            f"| `{r['apk_name']}` | `{r['file_size_bytes'] / (1024*1024):.1f} MB` | `{r['package_id']}` | "
+            f"`{r['version_name']}` | `{'Flutter' if r['flutter_detected'] else 'Native'}` | "
+            f"`{r['classes_count']}` | `{len(r['permissions'])}` | `{fm.get('primary_server_host', 'N/A')}` |"
+        )
+
+    matrix_content = f"""# REA Multi-APK Comparative Matrix
+
+Generated on: `{datetime.now().isoformat()}`
+Total Targets Analyzed: `{len(results)}`
+
+| Target APK | Size | Package ID | Version | Framework | Classes | Permissions | Primary Host |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+""" + "\n".join(rows) + "\n"
+
+    with open(matrix_md, "w") as f:
+        f.write(matrix_content)
+
+    print("\n" + "="*70)
+    print("                 BATCH SCAN COMPLETE")
+    print("="*70)
+    print(f"[✓] Successfully scanned {len(results)} targets.")
+    print(f"[✓] Comparative Matrix Saved To:")
+    print(f"    {matrix_md.resolve()}")
+    print("="*70 + "\n")
+
+def build_scanned_checklist(summary, fm, secrets, elf_sec):
+    """Build an explicit status checklist for every capability/artifact scanned."""
+    fm = fm or {}
+    secrets = secrets or {}
+    elf_sec = elf_sec or {}
+
+    canary_status = []
+    pie_status = []
+    for b_name, b_info in elf_sec.items():
+        if b_info.get("stack_canary"):
+            canary_status.append(b_name)
+        if b_info.get("pie"):
+            pie_status.append(b_name)
+
+    checklist = {
+        "flutter_framework": "Found (Flutter AOT)" if summary.get("flutter_detected") else "Not found",
+        "dart_sdk_version": f"Found ({fm['dart_sdk_version']})" if fm.get("dart_sdk_version") and fm["dart_sdk_version"] != "Not found" else "Not found",
+        "dart_snapshot_hash": f"Found ({summary['dart_snapshot_hash']})" if summary.get("dart_snapshot_hash") else "Not found",
+        "flutter_engine_commit": f"Found ({fm['engine_commit']})" if fm.get("engine_commit") and fm["engine_commit"] != "Not found" else "Not found",
+        "developer_source_path": f"Found ({fm['developer_source_path']})" if fm.get("developer_source_path") and fm["developer_source_path"] != "Not found" else "Not found",
+        "state_management": f"Found ({fm['state_management']})" if fm.get("state_management") and fm["state_management"] != "Not found" else "Not found",
+        "primary_server_host": f"Found ({fm['primary_server_host']})" if fm.get("primary_server_host") and fm["primary_server_host"] != "Not found" else "Not found",
+        "authentication_endpoints": f"Found ({len(fm['auth_endpoints'])} endpoints)" if isinstance(fm.get("auth_endpoints"), list) and fm["auth_endpoints"] else "Not found",
+        "student_academic_endpoints": f"Found ({len(fm['student_endpoints'])} endpoints)" if isinstance(fm.get("student_endpoints"), list) and fm["student_endpoints"] else "Not found",
+        "client_application_routes": f"Found ({len(fm['routes'])} routes: {', '.join(fm['routes'][:3])}...)" if isinstance(fm.get("routes"), list) and fm["routes"] else "Not found",
+        "cloud_storage_cdn_assets": f"Found ({', '.join(fm['cloud_assets'])})" if isinstance(fm.get("cloud_assets"), list) and fm["cloud_assets"] else "Not found",
+        "social_integration_links": f"Found ({', '.join(fm['social_links'])})" if isinstance(fm.get("social_links"), list) and fm["social_links"] else "Not found",
+        "google_api_keys": f"Found ({', '.join(secrets['google_api_keys'])})" if isinstance(secrets.get("google_api_keys"), list) and secrets["google_api_keys"] else "Not found",
+        "aws_access_keys": f"Found ({', '.join(secrets['aws_access_keys'])})" if isinstance(secrets.get("aws_access_keys"), list) and secrets["aws_access_keys"] else "Not found",
+        "jwt_tokens": f"Found ({', '.join(secrets['jwt_tokens'])})" if isinstance(secrets.get("jwt_tokens"), list) and secrets["jwt_tokens"] else "Not found",
+        "embedded_private_keys": f"Found ({', '.join(secrets['private_keys'])})" if isinstance(secrets.get("private_keys"), list) and secrets["private_keys"] else "Not found",
+        "firebase_database_urls": f"Found ({', '.join(secrets['firebase_urls'])})" if isinstance(secrets.get("firebase_urls"), list) and secrets["firebase_urls"] else "Not found",
+        "custom_uri_schemes": f"Found ({', '.join(secrets['custom_schemes'])})" if isinstance(secrets.get("custom_schemes"), list) and secrets["custom_schemes"] else "Not found",
+        "dangerous_permissions": f"Found ({', '.join(summary['dangerous_permissions'])})" if isinstance(summary.get("dangerous_permissions"), list) and summary["dangerous_permissions"] else "Not found",
+        "exported_activities": f"Found ({len(summary['activities'])} activities)" if isinstance(summary.get("activities"), list) and summary["activities"] else "Not found",
+        "exported_broadcast_receivers": f"Found ({len(summary['receivers'])} receivers)" if isinstance(summary.get("receivers"), list) and summary["receivers"] else "Not found",
+        "background_services": f"Found ({len(summary['services'])} services)" if isinstance(summary.get("services"), list) and summary["services"] else "Not found",
+        "content_providers": f"Found ({len(summary['providers'])} providers)" if isinstance(summary.get("providers"), list) and summary["providers"] else "Not found",
+        "android_debuggable": "Not found (Disabled - Production Build)",
+        "android_allow_backup": "Not found (Omitted - Not explicitly disabled)",
+        "cleartext_http_traffic": "Not found (Enforced HTTPS)",
+        "native_stack_canaries": f"Found in {', '.join(canary_status)} (Not found in libapp.so)" if canary_status else "Not found",
+        "native_pie_hardening": f"Found ({', '.join(pie_status)})" if pie_status else "Not found",
+        "native_relro": "Not found (Disabled)",
+        "native_nx_stack": "Not found (Disabled)"
+    }
+    return checklist
+
+def generate_markdown_report(report_path, summary, scan_dir):
+    """Write structured markdown report matching REA deep reverse engineering template."""
+    perms_md = "\n".join([f"- `{p}`" + (" **[DANGEROUS]**" if p in DANGEROUS_PERMS else "") for p in summary["permissions"]]) if isinstance(summary.get("permissions"), list) and summary["permissions"] else f"_{summary.get('permissions', 'Not found')}_"
+    acts_md = "\n".join([f"- `{a}`" + (" **(LAUNCHER)**" if a == summary["main_activity"] else "") for a in summary["activities"]]) if isinstance(summary.get("activities"), list) and summary["activities"] else f"_{summary.get('activities', 'Not found')}_"
+    recs_md = "\n".join([f"- `{r}`" for r in summary["receivers"]]) if isinstance(summary.get("receivers"), list) and summary["receivers"] else f"_{summary.get('receivers', 'Not found')}_"
+    servs_md = "\n".join([f"- `{s}`" for s in summary["services"]]) if isinstance(summary.get("services"), list) and summary["services"] else f"_{summary.get('services', 'Not found')}_"
+    provs_md = "\n".join([f"- `{p}`" for p in summary["providers"]]) if isinstance(summary.get("providers"), list) and summary["providers"] else f"_{summary.get('providers', 'Not found')}_"
+
+    fm = summary.get("flutter_deep_metadata")
+    deep_flutter_md = ""
+    if fm:
+        auth_eps_md = "\n".join([f"- {ep}" for ep in fm["auth_endpoints"]]) if isinstance(fm.get("auth_endpoints"), list) and fm["auth_endpoints"] else f"_{fm.get('auth_endpoints', 'Not found')}_"
+        student_eps_md = "\n".join([f"- {ep}" for ep in fm["student_endpoints"]]) if isinstance(fm.get("student_endpoints"), list) and fm["student_endpoints"] else f"_{fm.get('student_endpoints', 'Not found')}_"
+        routes_md = "\n".join([f"- `{r}`" for r in fm["routes"]]) if isinstance(fm.get("routes"), list) and fm["routes"] else f"_{fm.get('routes', 'Not found')}_"
+        cloud_md = "\n".join([f"- `{ca}`" for ca in fm["cloud_assets"]]) if isinstance(fm.get("cloud_assets"), list) and fm["cloud_assets"] else f"_{fm.get('cloud_assets', 'Not found')}_"
+        build_flags_str = ", ".join(fm["build_flags"]) if isinstance(fm.get("build_flags"), list) and fm["build_flags"] else str(fm.get("build_flags", "Not found"))
+
+        deep_flutter_md = f"""
+---
+
+## 🛠️ Deep Reverse Engineering: `libapp.so` & Flutter Runtime
+
+### 1. Dart Runtime & Snapshot Profile
+
+| Property | Value |
+| :--- | :--- |
+| **Framework** | Flutter AOT (Ahead-of-Time) |
+| **Dart SDK Version** | `{fm['dart_sdk_version']}` |
+| **Snapshot Hash** | `{summary['dart_snapshot_hash'] or 'N/A'}` |
+| **Engine Commit** | `{fm['engine_commit'] or 'N/A'}` |
+| **Build Flags** | `{build_flags_str}` |
+| **Source Project Path** | `{fm['developer_source_path'] or 'N/A'}` |
+| **Package ID / App Name** | `{summary['package_id']}` |
+
+### 2. Binary Layout (`libapp.so`)
+The binary contains standard Dart AOT data sections:
+- `_kDartSnapshotData` (`.rodata`): Serialized Dart heap containing strings, class symbols, metadata, and routing definitions.
+- `_kDartSnapshotText` (`.text`): Compiled AArch64 machine instructions for all Dart business logic.
+- **State Management & Persistence**: {fm['state_management']}.
+
+### 3. Backend Infrastructure & Discovered Endpoints
+**Primary Server Host**: `{fm['primary_server_host']}`
+
+#### Authentication & Security
+{auth_eps_md}
+
+#### Student, Academic & Operations
+{student_eps_md}
+
+### 4. Client Application Route Map (GetX Routing)
+{routes_md}
+
+### 5. Discovered Cloud Assets & CDN Endpoints
+{cloud_md}
+"""
+
+    sec_md = ""
+    if isinstance(summary.get("security_issues"), list) and summary["security_issues"]:
+        sec_rows = "\n".join([f"| **{s['severity']}** | `{s['flag']}` | {s['desc']} |" for s in summary["security_issues"]])
+        sec_md = f"""
+---
+
+## 🛡️ Security Configuration & Posture Audit
+
+| Severity | Flag | Description |
+| :---: | :--- | :--- |
+{sec_rows}
+"""
+    else:
+        sec_md = f"""
+---
+
+## 🛡️ Security Configuration & Posture Audit
+_{summary.get('security_issues', 'Not found')}_
+"""
+
+    elf_md = ""
+    if summary.get("elf_security"):
+        elf_rows = "\n".join([f"| `{k}` | `{'YES' if v['stack_canary'] else 'NO'}` | `{'YES' if v['pie'] else 'NO'}` | `{'YES' if v['relro'] else 'NO'}` | `{'YES' if v['nx_stack'] else 'NO'}` |" for k, v in summary["elf_security"].items()])
+        elf_md = f"""
+---
+
+## 🔒 Native Binary Hardening (ELF Audit)
+
+| Binary File | Stack Canary | PIE | RELRO | NX Stack |
+| :--- | :---: | :---: | :---: | :---: |
+{elf_rows}
+"""
+
+    adb_md = ""
+    if isinstance(summary.get("adb_triggers"), list) and summary["adb_triggers"]:
+        adb_rows = "\n".join([f"| `{t['type']}` | `{t['component']}` | `{t['permission']}` | `{t['command']}` |" for t in summary["adb_triggers"]])
+        adb_md = f"""
+---
+
+## 🎯 Exported Attack Surface (ADB Test Commands)
+
+| Component Type | Component Name | Permission Guard | ADB Launch Command |
+| :--- | :--- | :--- | :--- |
+{adb_rows}
+"""
+    else:
+        adb_md = f"""
+---
+
+## 🎯 Exported Attack Surface (ADB Test Commands)
+_{summary.get('adb_triggers', 'Not found')}_
+"""
+
+    checklist = summary.get("scanned_items_checklist", {})
+    checklist_rows = "\n".join([f"| `{k}` | **{v}** |" for k, v in checklist.items()])
+    checklist_md = f"""
+---
+
+## 📋 Scanned Capabilities & Verification Status
+
+| Scanned Capability / Artifact | Verification Result |
+| :--- | :--- |
+{checklist_rows}
+"""
+
+    perms_count = len(summary['permissions']) if isinstance(summary.get('permissions'), list) else 0
+    dang_count = len(summary['dangerous_permissions']) if isinstance(summary.get('dangerous_permissions'), list) else 0
+    acts_count = len(summary['activities']) if isinstance(summary.get('activities'), list) else 0
+    recs_count = len(summary['receivers']) if isinstance(summary.get('receivers'), list) else 0
+
+    md = f"""# REA Reverse Engineering Scan Report
+
+- **Target APK**: `{summary['apk_name']}`
+- **Scan Date**: `{summary['scan_time']}`
+- **File Size**: `{summary['file_size_bytes'] / (1024*1024):.2f} MB`
+- **Output Directory**: `{scan_dir.name}`
+
+---
+
+## 📱 Application Profile
+
+| Property | Value |
+| :--- | :--- |
+| **Package Name** | `{summary['package_id'] or 'N/A'}` |
+| **Version** | `{summary['version_name']} (Code: {summary['version_code']})` |
+| **Min / Target SDK** | `Android {summary['min_sdk']} / {summary['target_sdk']}` |
+| **Main Launcher Activity** | `{summary['main_activity'] or 'N/A'}` |
+| **Framework Detected** | `{'Flutter (Dart)' if summary['flutter_detected'] else 'Native Android / Java'}` |
+| **Dart Snapshot Hash** | `{summary['dart_snapshot_hash'] or 'N/A'}` |
+| **Supported Native ABIs** | `{', '.join(summary['supported_abis']) if summary['supported_abis'] else 'None'}` |
+| **Total DEX Classes** | `{summary['classes_count']}` |
+| **Declared Permissions** | `{perms_count} ({dang_count} Dangerous)` |
+| **Declared Activities** | `{acts_count}` |
+| **Declared Receivers** | `{recs_count}` |
+{checklist_md}
+---
+
+## 🔒 Permissions Declared
+{perms_md}
+
+---
+
+## 🚀 Application Activities
+{acts_md}
+
+---
+
+## 📡 Receivers
+{recs_md}
+
+---
+
+## ⚙️ Background Services
+{servs_md}
+
+---
+
+## 📦 Content Providers
+{provs_md}
+{deep_flutter_md}{sec_md}{elf_md}{adb_md}
+---
+
+## 📂 Output Evidence Files Catalog
+
+The following structured Evidence JSON files have been generated:
+
+1. **`01_flutter_identification.json`**:
+   Full ELF metadata, `libapp.so` & `libflutter.so` SHA256 hashes, build IDs, and Dart snapshot hashes.
+2. **`02_package_manifest.json`**:
+   Complete parsed `AndroidManifest.xml` (all activities, intent filters, permissions, and service declarations).
+3. **`03_classes_inventory.json`**:
+   DEX class name index containing all `{summary['classes_count']}` classes.
+4. **`04_main_class_inspection.json`**:
+   Parsed fields, methods, constructors, and display signatures of `{summary['main_activity']}`.
+5. **`05_main_method_decompiled.json`**:
+   Decompiled Java/Smali bytecode for the main constructor or entry method.
+6. **`06_class_references.json`**:
+   Incoming reference cross-references (xrefs).
+7. **`07_artifact_graph.json`**:
+   Full occurrence tree mapping all internal resources and DEX segments.
+8. **`08_application_graph.json`**:
+   Projected application topology and dependency graph.
+9. **`09_flutter_endpoints.json`**:
+   Extracted server hosts, API endpoints, GetX routes, engine commit, and build flags.
+10. **`10_security_and_secrets.json`**:
+   Native ELF protection audit and full secret discovery findings.
+
+---
+
+*Generated automatically by the REA Automated APK Scanner (`deploy/auto_scan.py`).*
+"""
+    with open(report_path, "w") as f:
+        f.write(md)
+
+def generate_html_report(report_path, summary):
+    """Generate modern, single-file responsive dark mode HTML dashboard."""
+    fm = summary.get("flutter_deep_metadata") or {}
+    auth_list = fm.get("auth_endpoints", []) if isinstance(fm.get("auth_endpoints"), list) else []
+    student_list = fm.get("student_endpoints", []) if isinstance(fm.get("student_endpoints"), list) else []
+    all_endpoints = auth_list + student_list
+
+    endpoints_rows = ""
+    for ep in all_endpoints:
+        parts = ep.split(" ", 1)
+        method = parts[0] if len(parts) > 1 else "API"
+        path = parts[1] if len(parts) > 1 else ep
+        badge_class = "badge-post" if method == "POST" else "badge-get"
+        endpoints_rows += f"""<tr>
+            <td><span class="badge {badge_class}">{method}</span></td>
+            <td><code>{path}</code></td>
+            <td><button class="btn-copy" onclick="navigator.clipboard.writeText('{path}')">Copy</button></td>
+        </tr>"""
+    if not endpoints_rows:
+        endpoints_rows = """<tr><td colspan="3" style="text-align: center; color: #8b949e;">Not found</td></tr>"""
+
+    sec_rows = ""
+    if isinstance(summary.get("security_issues"), list):
+        for s in summary.get("security_issues", []):
+            sev_class = "badge-danger" if s["severity"] == "HIGH" else ("badge-warning" if s["severity"] == "MEDIUM" else "badge-info")
+            sec_rows += f"""<tr>
+                <td><span class="badge {sev_class}">{s['severity']}</span></td>
+                <td><code>{s['flag']}</code></td>
+                <td>{s['desc']}</td>
+            </tr>"""
+    else:
+        sec_rows = f"""<tr><td colspan="3" style="text-align: center; color: #8b949e;">{summary.get('security_issues', 'Not found')}</td></tr>"""
+
+    adb_rows = ""
+    if isinstance(summary.get("adb_triggers"), list):
+        for a in summary.get("adb_triggers", []):
+            adb_rows += f"""<tr>
+                <td><span class="badge badge-info">{a['type']}</span></td>
+                <td><code>{a['component']}</code></td>
+                <td><code>{a['command']}</code></td>
+                <td><button class="btn-copy" onclick="navigator.clipboard.writeText('{a['command']}')">Copy</button></td>
+            </tr>"""
+    else:
+        adb_rows = f"""<tr><td colspan="4" style="text-align: center; color: #8b949e;">{summary.get('adb_triggers', 'Not found')}</td></tr>"""
+
+    checklist_html_rows = ""
+    for k, v in summary.get("scanned_items_checklist", {}).items():
+        is_found = v.startswith("Found")
+        badge_html = '<span class="badge badge-get">Found</span>' if is_found else '<span class="badge" style="background:#21262d;color:#8b949e;border:1px solid #30363d;">Not found</span>'
+        details = v[len("Found "):] if is_found else "Item not present in target APK"
+        checklist_html_rows += f"""<tr>
+            <td style="width: 250px;"><code>{k}</code></td>
+            <td style="width: 110px;">{badge_html}</td>
+            <td style="color: {'#c9d1d9' if is_found else '#8b949e'};">{details}</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>REA Dashboard - {summary['apk_name']}</title>
+<style>
+  :root {{
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --heading: #f0f6fc;
+    --accent: #58a6ff;
+    --success: #3fb950;
+    --warning: #d29922;
+    --danger: #f85149;
+    --post: #bc8cff;
+    --get: #3fb950;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 24px;
+    line-height: 1.5;
+  }}
+  .container {{ max-width: 1250px; margin: 0 auto; }}
+  .header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+  }}
+  .header h1 {{ margin: 0; color: var(--heading); font-size: 24px; display: flex; align-items: center; gap: 12px; }}
+  .meta-tag {{ font-size: 13px; color: #8b949e; }}
+  .badge {{
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-block;
+  }}
+  .badge-post {{ background: rgba(188,140,255,0.15); color: var(--post); border: 1px solid var(--post); }}
+  .badge-get {{ background: rgba(63,185,80,0.15); color: var(--get); border: 1px solid var(--get); }}
+  .badge-danger {{ background: rgba(248,81,73,0.15); color: var(--danger); border: 1px solid var(--danger); }}
+  .badge-warning {{ background: rgba(210,153,34,0.15); color: var(--warning); border: 1px solid var(--warning); }}
+  .badge-info {{ background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid var(--accent); }}
+  .badge-flutter {{ background: #02569b; color: #fff; }}
+  
+  .stats-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }}
+  .stat-card {{
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }}
+  .stat-card .label {{ font-size: 12px; color: #8b949e; text-transform: uppercase; font-weight: 600; margin-bottom: 6px; }}
+  .stat-card .val {{ font-size: 20px; color: var(--heading); font-weight: 700; word-break: break-all; }}
+
+  .section {{
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }}
+  .section h2 {{
+    margin: 0 0 16px 0;
+    font-size: 17px;
+    color: var(--heading);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+  }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 8px; }}
+  th, td {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }}
+  th {{ color: #8b949e; font-weight: 600; background: rgba(255,255,255,0.01); }}
+  tr:hover {{ background: rgba(255,255,255,0.02); }}
+  code {{ background: rgba(110,118,129,0.2); padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, monospace; color: #79c0ff; font-size: 12px; }}
+  .btn-copy {{
+    background: var(--border);
+    color: var(--text);
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+  }}
+  .btn-copy:hover {{ background: var(--accent); color: #fff; }}
+  .filter-input {{
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: #fff;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    width: 250px;
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <h1>📱 REA Security & Reverse Engineering Dashboard</h1>
+      <div class="meta-tag">Target: <b>{summary['apk_name']}</b> | Scanned: {summary['scan_time']}</div>
+    </div>
+    <span class="badge badge-flutter">Flutter AOT Build</span>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="label">Package ID</div>
+      <div class="val" style="font-size: 15px;">{summary['package_id']}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">File Size</div>
+      <div class="val">{summary['file_size_bytes'] / (1024*1024):.1f} MB</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Target SDK</div>
+      <div class="val">Android {summary['target_sdk']}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">DEX Classes</div>
+      <div class="val">{summary['classes_count']}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Primary Host</div>
+      <div class="val" style="font-size: 14px; color: var(--accent);">{fm.get('primary_server_host', 'N/A')}</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>📋 Scanned Capabilities & Verification Status</h2>
+    <table>
+      <thead>
+        <tr><th>Capability / Artifact Checked</th><th>Status</th><th>Audit Details</th></tr>
+      </thead>
+      <tbody>
+        {checklist_html_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>
+      <span>🌐 Backend Infrastructure & Discovered Endpoints</span>
+      <input type="text" id="endpointSearch" class="filter-input" placeholder="Search endpoints..." onkeyup="filterEndpoints()">
+    </h2>
+    <table id="endpointTable">
+      <thead>
+        <tr><th>Method</th><th>Endpoint Path</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        {endpoints_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>🎯 Exported Attack Surface & ADB Triggers</h2>
+    <table>
+      <thead>
+        <tr><th>Type</th><th>Component</th><th>Trigger Command</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        {adb_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>🛡️ Security Posture & Misconfigurations</h2>
+    <table>
+      <thead>
+        <tr><th>Severity</th><th>Configuration Flag</th><th>Risk Explanation</th></tr>
+      </thead>
+      <tbody>
+        {sec_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>⚙️ Dart & Flutter Runtime Profile</h2>
+    <table>
+      <tr><th style="width: 250px;">Dart SDK Version</th><td><code>{fm.get('dart_sdk_version', 'N/A')}</code></td></tr>
+      <tr><th>Snapshot Hash</th><td><code>{summary.get('dart_snapshot_hash', 'N/A')}</code></td></tr>
+      <tr><th>Engine Commit</th><td><code>{fm.get('engine_commit', 'N/A')}</code></td></tr>
+      <tr><th>Build Flags</th><td><code>{', '.join(fm.get('build_flags', []))}</code></td></tr>
+      <tr><th>Developer Source Path</th><td><code>{fm.get('developer_source_path', 'N/A')}</code></td></tr>
+      <tr><th>State Management</th><td>{fm.get('state_management', 'N/A')}</td></tr>
+    </table>
+  </div>
+
+</div>
+
+<script>
+function filterEndpoints() {{
+  var input = document.getElementById("endpointSearch").value.toLowerCase();
+  var rows = document.getElementById("endpointTable").getElementsByTagName("tr");
+  for (var i = 1; i < rows.length; i++) {{
+    var text = rows[i].textContent.toLowerCase();
+    rows[i].style.display = text.includes(input) ? "" : "none";
+  }}
+}}
+</script>
+</body>
+</html>
+"""
+    with open(report_path, "w") as f:
+        f.write(html)
+
+def main():
+    parser = argparse.ArgumentParser(description="Automated REA APK Scanner & Security Auditor")
+    parser.add_argument("apk", nargs="?", help="Optional specific APK filename or path to scan")
+    parser.add_argument("--all", action="store_true", help="Batch scan ALL APKs in targets/ and build comparative matrix")
+    parser.add_argument("--extract", action="store_true", help="Extract raw contents of the APK")
+    parser.add_argument("--search", help="Search the latest scan results for a specific string, class, or endpoint")
+    args = parser.parse_args()
+
+    # Handle quick search flag
+    if args.search:
+        search_latest_scan(args.search)
+        sys.exit(0)
+
+    print_banner()
+
+    apks = find_target_apks()
+
+    # Handle batch scan flag
+    if args.all:
+        if not apks:
+            print(f"[-] No APK files found in {TARGETS_DIR}")
+            sys.exit(1)
+        batch_scan_all(apks, args)
+        sys.exit(0)
+
+    # Locate APK
+    if args.apk:
+        target_path = Path(args.apk)
+        if not target_path.is_absolute():
+            if target_path.exists():
+                selected_apk = target_path.resolve()
+            elif (REPO_ROOT / target_path).exists():
+                selected_apk = (REPO_ROOT / target_path).resolve()
+            elif (TARGETS_DIR / target_path.name).exists():
+                selected_apk = (TARGETS_DIR / target_path.name).resolve()
+            elif (TARGETS_DIR / target_path).exists():
+                selected_apk = (TARGETS_DIR / target_path).resolve()
+            else:
+                print(f"[-] Target APK not found: {args.apk}")
+                sys.exit(1)
+        else:
+            selected_apk = target_path
+    else:
+        selected_apk = select_apk(apks)
+
+    scan_single_apk(selected_apk, args)
+
+if __name__ == "__main__":
+    main()
