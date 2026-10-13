@@ -72,3 +72,7 @@ Thumbs.db
 
 # Complete static website output, including generated language editions.
 website/_site/
+
+# Scan outputs
+/deploy/py_scan/results/*
+!/deploy/py_scan/results/.gitkeep
