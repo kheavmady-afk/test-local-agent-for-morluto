@@ -184,14 +184,14 @@ def run_rea_cmd(command_name, args, as_json=True):
     }
 
 def audit_native_elf_security(apk_path):
-    """Inspect ELF security hardening features on native libraries."""
+    """Inspect ELF security hardening features and exported JNI symbols on native libraries."""
     elf_findings = {}
     try:
         with zipfile.ZipFile(apk_path) as z:
             names = z.namelist()
             so_files = [n for n in names if n.endswith(".so") and "arm64-v8a" in n]
             if not so_files:
-                so_files = [n for n in names if n.endswith(".so")][:2]
+                so_files = [n for n in names if n.endswith(".so")][:4]
 
             for so_path in so_files:
                 data = z.read(so_path)
@@ -201,23 +201,54 @@ def audit_native_elf_security(apk_path):
                 has_relro = b"GNU_RELRO" in data
                 has_nx = b"GNU_STACK" in data
 
+                # Extract exported JNI function entrypoints
+                jni_symbols = sorted(list(set(m.decode("utf-8", "ignore") for m in re.findall(rb"Java_[a-zA-Z0-9_]+", data))))
+
                 elf_findings[fname] = {
                     "path": so_path,
                     "size_bytes": len(data),
                     "stack_canary": has_canary,
                     "pie": has_pie,
                     "relro": has_relro,
-                    "nx_stack": has_nx
+                    "nx_stack": has_nx,
+                    "jni_exports": jni_symbols
                 }
     except Exception:
         pass
     return elf_findings
+
+def scan_assets_catalog(apk_path):
+    """Catalog embedded databases, certificates, and configuration files in assets/."""
+    catalog = {
+        "embedded_databases": [],
+        "embedded_certificates": [],
+        "embedded_configs": [],
+        "total_assets_count": 0
+    }
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            assets = [n for n in z.namelist() if n.startswith("assets/")]
+            catalog["total_assets_count"] = len(assets)
+            for a in assets:
+                lower = a.lower()
+                if lower.endswith((".db", ".sqlite", ".sqlite3")):
+                    catalog["embedded_databases"].append(a)
+                elif lower.endswith((".crt", ".pem", ".der", ".bks", ".p12", ".pfx")):
+                    catalog["embedded_certificates"].append(a)
+                elif lower.endswith((".env", ".properties")) or a.endswith(("FontManifest.json", "NativeAssetsManifest.json")):
+                    catalog["embedded_configs"].append(a)
+    except Exception:
+        pass
+    return catalog
 
 def scan_full_apk_secrets(apk_path):
     """Scan all DEX, native libraries, and assets for secrets, keys, and cloud patterns."""
     secrets = {
         "google_api_keys": [],
         "aws_access_keys": [],
+        "stripe_keys": [],
+        "github_tokens": [],
+        "slack_webhooks": [],
         "jwt_tokens": [],
         "private_keys": [],
         "custom_schemes": [],
@@ -238,6 +269,26 @@ def scan_full_apk_secrets(apk_path):
                         k = m.decode("utf-8", "ignore")
                         if k not in secrets["aws_access_keys"]:
                             secrets["aws_access_keys"].append(k)
+                    # Stripe Keys
+                    for m in re.findall(rb"(?:sk|pk)_(?:live|test)_[0-9a-zA-Z]{24,}", data):
+                        k = m.decode("utf-8", "ignore")
+                        if k not in secrets["stripe_keys"]:
+                            secrets["stripe_keys"].append(k)
+                    # GitHub Personal Access Tokens
+                    for m in re.findall(rb"gh[pousr]_[A-Za-z0-9_]{36,}", data):
+                        k = m.decode("utf-8", "ignore")
+                        if k not in secrets["github_tokens"]:
+                            secrets["github_tokens"].append(k)
+                    # Slack Webhooks
+                    for m in re.findall(rb"https://hooks\.slack\.com/services/T[a-zA-Z0-9_]+/B[a-zA-Z0-9_]+/[a-zA-Z0-9_]+", data):
+                        k = m.decode("utf-8", "ignore")
+                        if k not in secrets["slack_webhooks"]:
+                            secrets["slack_webhooks"].append(k)
+                    # Private Keys
+                    for m in re.findall(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----", data):
+                        k = m.decode("utf-8", "ignore")
+                        if k not in secrets["private_keys"]:
+                            secrets["private_keys"].append(k)
                     # JWT Tokens
                     for m in re.findall(rb"eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}", data):
                         k = m.decode("utf-8", "ignore")
@@ -261,6 +312,21 @@ def scan_full_apk_secrets(apk_path):
     for k, v in secrets.items():
         formatted_secrets[k] = v if len(v) > 0 else "Not found"
     return formatted_secrets
+
+def scan_flutter_plugins(container_apk_path):
+    """Decompile GeneratedPluginRegistrant to extract all registered Flutter plugins."""
+    plugins = []
+    res = run_rea_cmd("inspect-android-method", [container_apk_path, "io.flutter.plugins.GeneratedPluginRegistrant", "registerWith"])
+    if res.get("success"):
+        norm = res.get("data", {}).get("normalized_result", {})
+        source_text = norm.get("source", {}).get("text", "")
+        matches = re.findall(r'Error registering plugin\s+([^,]+),\s*([^"]+)', source_text)
+        for name, cls in matches:
+            plugins.append({
+                "plugin_name": name.strip(),
+                "plugin_class": cls.strip()
+            })
+    return plugins
 
 def extract_flutter_deep_metadata(apk_path):
     """Extract deep Flutter AOT endpoints, routes, developer paths, engine commits, and server hosts."""
@@ -328,6 +394,16 @@ def extract_flutter_deep_metadata(apk_path):
         ]
         student_eps = [e for e in student_eps if e]
 
+        # General / Uncategorized discovered API routes
+        categorized_strs = set()
+        for e in (auth_eps + student_eps):
+            clean_e = e.split(" ")[1] if " " in e else e
+            categorized_strs.add(clean_e.strip("/"))
+        other_eps = []
+        for ep in sorted(list(clean_eps)):
+            if not any(cat in ep or ep in cat for cat in categorized_strs):
+                other_eps.append(f"/{ep}")
+
         # 3. Route Map
         candidate_routes = [
             "/loginparen",
@@ -384,6 +460,7 @@ def extract_flutter_deep_metadata(apk_path):
             "build_flags": build_flags if build_flags else "Not found",
             "auth_endpoints": auth_eps if auth_eps else "Not found",
             "student_endpoints": student_eps if student_eps else "Not found",
+            "other_endpoints": other_eps if other_eps else "Not found",
             "routes": detected_routes if detected_routes else "Not found",
             "developer_source_path": dev_path or "Not found",
             "cloud_assets": cloud_assets if cloud_assets else "Not found",
@@ -394,9 +471,10 @@ def extract_flutter_deep_metadata(apk_path):
         return None
 
 def audit_security_and_attack_surface(manifest_xml, package_id):
-    """Audit Android security configuration flags and generate copyable ADB attack triggers."""
+    """Audit Android security configuration flags, deep links, and generate copyable ADB attack triggers."""
     issues = []
     adb_triggers = []
+    deep_links = []
 
     # allowBackup audit
     if 'android:allowBackup="true"' in manifest_xml:
@@ -435,7 +513,21 @@ def audit_security_and_attack_surface(manifest_xml, package_id):
         cmd = f"adb shell am broadcast -n {package_id}/{rec}"
         adb_triggers.append({"component": rec, "type": "Broadcast Receiver", "command": cmd, "permission": perm})
 
-    return issues, adb_triggers
+    # Deep links & intent schemes
+    intent_blocks = re.findall(r'<intent-filter.*?</intent-filter>', manifest_xml, re.DOTALL)
+    for block in intent_blocks:
+        if 'android.intent.action.VIEW' in block:
+            schemes = re.findall(r'android:scheme="([^"]+)"', block)
+            hosts = re.findall(r'android:host="([^"]+)"', block)
+            if schemes:
+                for s in schemes:
+                    if hosts:
+                        for h in hosts:
+                            deep_links.append(f"{s}://{h}")
+                    else:
+                        deep_links.append(f"{s}://")
+
+    return issues, adb_triggers, deep_links
 
 def search_latest_scan(query):
     """Quickly search strings, endpoints, or classes in the latest scan output."""
@@ -505,6 +597,9 @@ def scan_single_apk(selected_apk, args):
         "providers": "Not found",
         "security_issues": "Not found",
         "adb_triggers": "Not found",
+        "deep_links": "Not found",
+        "flutter_plugins": [],
+        "assets_catalog": {},
         "elf_security": {},
         "discovered_secrets": {},
         "dart_snapshot_hash": None,
@@ -564,9 +659,10 @@ def scan_single_apk(selected_apk, args):
         report_summary["providers"] = providers if providers else "Not found"
 
         # Security Posture & Attack Surface Audit
-        sec_issues, adb_triggers = audit_security_and_attack_surface(manifest_xml, pkg_id)
+        sec_issues, adb_triggers, deep_links = audit_security_and_attack_surface(manifest_xml, pkg_id)
         report_summary["security_issues"] = sec_issues if sec_issues else "Not found"
         report_summary["adb_triggers"] = adb_triggers if adb_triggers else "Not found"
+        report_summary["deep_links"] = deep_links if deep_links else "Not found"
 
         for act in activities:
             if "MainActivity" in act:
@@ -631,6 +727,15 @@ def scan_single_apk(selected_apk, args):
     else:
         print("[5/10] Decompile Method... [SKIPPED]")
 
+    # Step 5b: Decompile Flutter Plugins if Flutter detected
+    if report_summary["flutter_detected"]:
+        print("[5b/10] Decompiling Flutter Registered Plugins...", end="", flush=True)
+        flutter_plugins = scan_flutter_plugins(container_apk_path)
+        report_summary["flutter_plugins"] = flutter_plugins
+        with open(scan_dir / "05b_flutter_plugins.json", "w") as f:
+            json.dump(flutter_plugins, f, indent=2)
+        print(f" [OK] (Discovered {len(flutter_plugins)} plugins)")
+
     # Step 6: Trace Class References
     if discovered_main_activity:
         print(f"[6/10] Running trace-android-references...", end="", flush=True)
@@ -681,15 +786,17 @@ def scan_single_apk(selected_apk, args):
     else:
         print("[9/10] Flutter Deep Analysis... [SKIPPED - Non-Flutter App]")
 
-    # Step 10: Native ELF Hardening & Secrets Audit
-    print("[10/10] Auditing Native ELF Security & Scanning Secrets...", end="", flush=True)
+    # Step 10: Native ELF Hardening, Assets Catalog & Secrets Audit
+    print("[10/10] Auditing Native ELF Security, Bundled Assets & Scanning Secrets...", end="", flush=True)
     elf_sec = audit_native_elf_security(selected_apk)
     report_summary["elf_security"] = elf_sec
     discovered_secrets = scan_full_apk_secrets(selected_apk)
     report_summary["discovered_secrets"] = discovered_secrets
+    assets_cat = scan_assets_catalog(selected_apk)
+    report_summary["assets_catalog"] = assets_cat
     with open(scan_dir / "10_security_and_secrets.json", "w") as f:
-        json.dump({"elf_security": elf_sec, "secrets": discovered_secrets}, f, indent=2)
-    print(f" [OK] ({len(elf_sec)} native binaries audited)")
+        json.dump({"elf_security": elf_sec, "secrets": discovered_secrets, "assets_catalog": assets_cat}, f, indent=2)
+    print(f" [OK] ({len(elf_sec)} native binaries, {assets_cat['total_assets_count']} assets audited)")
 
     # Build explicit Scanned Items Audit Checklist
     checklist = build_scanned_checklist(report_summary, report_summary.get("flutter_deep_metadata"), discovered_secrets, elf_sec)
@@ -772,6 +879,12 @@ def scan_single_apk(selected_apk, args):
             print("\nDiscovered Cloud Storage / CDN Assets:")
             for ca in fm['cloud_assets']:
                 print(f"  - {ca}")
+
+    if report_summary.get("flutter_plugins"):
+        print("-" * 70)
+        print(f"Registered Flutter Plugins ({len(report_summary['flutter_plugins'])}):")
+        for p in report_summary["flutter_plugins"]:
+            print(f"  - {p['plugin_name']}: {p['plugin_class']}")
 
     if report_summary["elf_security"]:
         print("-" * 70)
@@ -858,8 +971,12 @@ def build_scanned_checklist(summary, fm, secrets, elf_sec):
         if b_info.get("pie"):
             pie_status.append(b_name)
 
+    plugin_names = [p['plugin_name'] for p in summary.get('flutter_plugins', [])]
+    plugin_str = f"Found ({len(plugin_names)} plugins: {', '.join(plugin_names)})" if plugin_names else "Not found"
+
     checklist = {
         "flutter_framework": "Found (Flutter AOT)" if summary.get("flutter_detected") else "Not found",
+        "flutter_plugins": plugin_str,
         "dart_sdk_version": f"Found ({fm['dart_sdk_version']})" if fm.get("dart_sdk_version") and fm["dart_sdk_version"] != "Not found" else "Not found",
         "dart_snapshot_hash": f"Found ({summary['dart_snapshot_hash']})" if summary.get("dart_snapshot_hash") else "Not found",
         "flutter_engine_commit": f"Found ({fm['engine_commit']})" if fm.get("engine_commit") and fm["engine_commit"] != "Not found" else "Not found",
@@ -873,10 +990,14 @@ def build_scanned_checklist(summary, fm, secrets, elf_sec):
         "social_integration_links": f"Found ({', '.join(fm['social_links'])})" if isinstance(fm.get("social_links"), list) and fm["social_links"] else "Not found",
         "google_api_keys": f"Found ({', '.join(secrets['google_api_keys'])})" if isinstance(secrets.get("google_api_keys"), list) and secrets["google_api_keys"] else "Not found",
         "aws_access_keys": f"Found ({', '.join(secrets['aws_access_keys'])})" if isinstance(secrets.get("aws_access_keys"), list) and secrets["aws_access_keys"] else "Not found",
+        "stripe_api_keys": f"Found ({', '.join(secrets['stripe_keys'])})" if isinstance(secrets.get("stripe_keys"), list) and secrets["stripe_keys"] else "Not found",
+        "github_tokens": f"Found ({', '.join(secrets['github_tokens'])})" if isinstance(secrets.get("github_tokens"), list) and secrets["github_tokens"] else "Not found",
+        "slack_webhooks": f"Found ({', '.join(secrets['slack_webhooks'])})" if isinstance(secrets.get("slack_webhooks"), list) and secrets["slack_webhooks"] else "Not found",
         "jwt_tokens": f"Found ({', '.join(secrets['jwt_tokens'])})" if isinstance(secrets.get("jwt_tokens"), list) and secrets["jwt_tokens"] else "Not found",
         "embedded_private_keys": f"Found ({', '.join(secrets['private_keys'])})" if isinstance(secrets.get("private_keys"), list) and secrets["private_keys"] else "Not found",
         "firebase_database_urls": f"Found ({', '.join(secrets['firebase_urls'])})" if isinstance(secrets.get("firebase_urls"), list) and secrets["firebase_urls"] else "Not found",
         "custom_uri_schemes": f"Found ({', '.join(secrets['custom_schemes'])})" if isinstance(secrets.get("custom_schemes"), list) and secrets["custom_schemes"] else "Not found",
+        "deep_links_schemes": f"Found ({', '.join(summary['deep_links'])})" if summary.get("deep_links") and summary["deep_links"] != "Not found" else "Not found",
         "dangerous_permissions": f"Found ({', '.join(summary['dangerous_permissions'])})" if isinstance(summary.get("dangerous_permissions"), list) and summary["dangerous_permissions"] else "Not found",
         "exported_activities": f"Found ({len(summary['activities'])} activities)" if isinstance(summary.get("activities"), list) and summary["activities"] else "Not found",
         "exported_broadcast_receivers": f"Found ({len(summary['receivers'])} receivers)" if isinstance(summary.get("receivers"), list) and summary["receivers"] else "Not found",
@@ -888,7 +1009,8 @@ def build_scanned_checklist(summary, fm, secrets, elf_sec):
         "native_stack_canaries": f"Found in {', '.join(canary_status)} (Not found in libapp.so)" if canary_status else "Not found",
         "native_pie_hardening": f"Found ({', '.join(pie_status)})" if pie_status else "Not found",
         "native_relro": "Not found (Disabled)",
-        "native_nx_stack": "Not found (Disabled)"
+        "native_nx_stack": "Not found (Disabled)",
+        "embedded_assets": f"Found ({summary['assets_catalog'].get('total_assets_count', 0)} assets cataloged)" if summary.get("assets_catalog") else "Not found"
     }
     return checklist
 
@@ -948,6 +1070,45 @@ The binary contains standard Dart AOT data sections:
 {cloud_md}
 """
 
+    plugins_md = ""
+    if summary.get("flutter_plugins"):
+        p_rows = "\n".join([f"| `{p['plugin_name']}` | `{p['plugin_class']}` |" for p in summary["flutter_plugins"]])
+        plugins_md = f"""
+---
+
+## 🧩 Decompiled Flutter Plugins (`GeneratedPluginRegistrant`)
+
+| Plugin Name | Java Implementation Class |
+| :--- | :--- |
+{p_rows}
+"""
+
+    links_md = ""
+    if summary.get("deep_links") and summary["deep_links"] != "Not found":
+        l_rows = "\n".join([f"- `{lnk}`" for lnk in summary["deep_links"]])
+        links_md = f"""
+---
+
+## 🔗 Deep Links & Intent URL Schemes
+{l_rows}
+"""
+
+    assets_md = ""
+    if summary.get("assets_catalog"):
+        ac = summary["assets_catalog"]
+        db_str = ", ".join(ac.get("embedded_databases", [])) or "None"
+        cert_str = ", ".join(ac.get("embedded_certificates", [])) or "None"
+        cfg_str = ", ".join(ac.get("embedded_configs", [])) or "None"
+        assets_md = f"""
+---
+
+## 📦 Bundled Assets Catalog
+- **Total Assets Count:** `{ac.get('total_assets_count', 0)}`
+- **Embedded Databases:** `{db_str}`
+- **Embedded Certificates:** `{cert_str}`
+- **Embedded Configs / Manifests:** `{cfg_str}`
+"""
+
     sec_md = ""
     if isinstance(summary.get("security_issues"), list) and summary["security_issues"]:
         sec_rows = "\n".join([f"| **{s['severity']}** | `{s['flag']}` | {s['desc']} |" for s in summary["security_issues"]])
@@ -970,15 +1131,19 @@ _{summary.get('security_issues', 'Not found')}_
 
     elf_md = ""
     if summary.get("elf_security"):
-        elf_rows = "\n".join([f"| `{k}` | `{'YES' if v['stack_canary'] else 'NO'}` | `{'YES' if v['pie'] else 'NO'}` | `{'YES' if v['relro'] else 'NO'}` | `{'YES' if v['nx_stack'] else 'NO'}` |" for k, v in summary["elf_security"].items()])
+        elf_rows = []
+        for k, v in summary["elf_security"].items():
+            jni_count = len(v.get("jni_exports", []))
+            elf_rows.append(f"| `{k}` | `{'YES' if v['stack_canary'] else 'NO'}` | `{'YES' if v['pie'] else 'NO'}` | `{'YES' if v['relro'] else 'NO'}` | `{'YES' if v['nx_stack'] else 'NO'}` | `{jni_count}` |")
+        elf_rows_str = "\n".join(elf_rows)
         elf_md = f"""
 ---
 
 ## 🔒 Native Binary Hardening (ELF Audit)
 
-| Binary File | Stack Canary | PIE | RELRO | NX Stack |
-| :--- | :---: | :---: | :---: | :---: |
-{elf_rows}
+| Binary File | Stack Canary | PIE | RELRO | NX Stack | JNI Exports |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+{elf_rows_str}
 """
 
     adb_md = ""
@@ -1018,6 +1183,9 @@ _{summary.get('adb_triggers', 'Not found')}_
     acts_count = len(summary['activities']) if isinstance(summary.get('activities'), list) else 0
     recs_count = len(summary['receivers']) if isinstance(summary.get('receivers'), list) else 0
 
+    plugin_names = [p['plugin_name'] for p in summary.get('flutter_plugins', [])]
+    plugins_profile_row = f"| **Registered Plugins** | `{len(plugin_names)} ({', '.join(plugin_names)})` |\n" if plugin_names else ""
+
     md = f"""# REA Reverse Engineering Scan Report
 
 - **Target APK**: `{summary['apk_name']}`
@@ -1042,7 +1210,7 @@ _{summary.get('adb_triggers', 'Not found')}_
 | **Declared Permissions** | `{perms_count} ({dang_count} Dangerous)` |
 | **Declared Activities** | `{acts_count}` |
 | **Declared Receivers** | `{recs_count}` |
-{checklist_md}
+{plugins_profile_row}{checklist_md}
 ---
 
 ## 🔒 Permissions Declared
@@ -1067,7 +1235,7 @@ _{summary.get('adb_triggers', 'Not found')}_
 
 ## 📦 Content Providers
 {provs_md}
-{deep_flutter_md}{sec_md}{elf_md}{adb_md}
+{deep_flutter_md}{plugins_md}{links_md}{assets_md}{sec_md}{elf_md}{adb_md}
 ---
 
 ## 📂 Output Evidence Files Catalog
@@ -1084,16 +1252,18 @@ The following structured Evidence JSON files have been generated:
    Parsed fields, methods, constructors, and display signatures of `{summary['main_activity']}`.
 5. **`05_main_method_decompiled.json`**:
    Decompiled Java/Smali bytecode for the main constructor or entry method.
-6. **`06_class_references.json`**:
+6. **`05b_flutter_plugins.json`**:
+   Decompiled Flutter registered plugins and Java bridge classes.
+7. **`06_class_references.json`**:
    Incoming reference cross-references (xrefs).
-7. **`07_artifact_graph.json`**:
+8. **`07_artifact_graph.json`**:
    Full occurrence tree mapping all internal resources and DEX segments.
-8. **`08_application_graph.json`**:
+9. **`08_application_graph.json`**:
    Projected application topology and dependency graph.
-9. **`09_flutter_endpoints.json`**:
-   Extracted server hosts, API endpoints, GetX routes, engine commit, and build flags.
-10. **`10_security_and_secrets.json`**:
-   Native ELF protection audit and full secret discovery findings.
+10. **`09_flutter_endpoints.json`**:
+    Extracted server hosts, API endpoints, GetX routes, engine commit, and build flags.
+11. **`10_security_and_secrets.json`**:
+    Native ELF protection audit, JNI exports, assets catalog, and full secret discovery findings.
 
 ---
 
@@ -1157,6 +1327,15 @@ def generate_html_report(report_path, summary):
             <td style="width: 110px;">{badge_html}</td>
             <td style="color: {'#c9d1d9' if is_found else '#8b949e'};">{details}</td>
         </tr>"""
+
+    plugins_html_rows = ""
+    for p in summary.get("flutter_plugins", []):
+        plugins_html_rows += f"""<tr>
+            <td><code>{p['plugin_name']}</code></td>
+            <td><code>{p['plugin_class']}</code></td>
+        </tr>"""
+    if not plugins_html_rows:
+        plugins_html_rows = """<tr><td colspan="2" style="text-align: center; color: #8b949e;">No plugins found</td></tr>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1298,9 +1477,25 @@ def generate_html_report(report_path, summary):
       <div class="val">{summary['classes_count']}</div>
     </div>
     <div class="stat-card">
+      <div class="label">Plugins</div>
+      <div class="val" style="color: var(--success);">{len(summary.get('flutter_plugins', []))} Active</div>
+    </div>
+    <div class="stat-card">
       <div class="label">Primary Host</div>
       <div class="val" style="font-size: 14px; color: var(--accent);">{fm.get('primary_server_host', 'N/A')}</div>
     </div>
+  </div>
+
+  <div class="section">
+    <h2>🧩 Decompiled Flutter Plugins (`GeneratedPluginRegistrant`)</h2>
+    <table>
+      <thead>
+        <tr><th>Plugin Name</th><th>Java Implementation Class</th></tr>
+      </thead>
+      <tbody>
+        {plugins_html_rows}
+      </tbody>
+    </table>
   </div>
 
   <div class="section">
