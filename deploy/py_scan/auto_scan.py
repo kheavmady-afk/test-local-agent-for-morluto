@@ -1067,15 +1067,9 @@ def scan_single_apk(selected_apk, args):
     report_html_path = scan_dir / "SCAN_REPORT.html"
     generate_html_report(report_html_path, report_summary)
 
-    # Save summary.json to scan directory, results root, and script directory
+    # Save summary.json to the dedicated scan directory
     with open(scan_dir / "summary.json", "w") as f:
         json.dump(report_summary, f, indent=2)
-
-    try:
-        with open(RESULTS_DIR / "summary.json", "w") as f:
-            json.dump(report_summary, f, indent=2)
-    except Exception:
-        pass
 
     # Update latest symlink
     latest_link = RESULTS_DIR / "latest"
