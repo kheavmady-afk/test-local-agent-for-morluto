@@ -32,28 +32,188 @@ RESULTS_DIR = SCRIPT_DIR / "results"
 CONTAINER_NAME = "rea-core"
 CONTAINER_TARGETS_DIR = "/workspace/targets"
 
-# Known Engine commit to Flutter/Dart SDK mapping
+# Known Flutter Engine commit to (Flutter Version, Dart Version) mapping
+# Used as offline fallback when dynamic banner extraction requires exact framework release pairing.
 ENGINE_COMMIT_MAP = {
-    "af7e796e161ae0bb1ff0758c71a7105418bd9ded": ("3.13.4", "3.1.2 / 3.13.4"),
+    # Custom / local candidate
+    "af7e796e161ae0bb1ff0758c71a7105418bd9ded": ("3.13.4", "Dart 3.1.2 / 3.13.4"),
+
+    # Flutter 3.24.x (Dart 3.5.x)
+    "a18df97ca57a249df5d8d68cd0820600223ce262": ("3.24.5", "Dart 3.5.4"),
+    "36335019a8eab588c3c2ea783c618d90505be233": ("3.24.3", "Dart 3.5.3"),
+    "b8800d88be4866db1b15f8b954ab2573bba9960f": ("3.24.0", "Dart 3.5.0"),
+
+    # Flutter 3.22.x (Dart 3.4.x)
+    "235db911ba279722f5e685f38b0ed30fa7e8570a": ("3.22.3", "Dart 3.4.4"),
+    "f6344b75dcf861d8bf1f1322780b8811f982e31a": ("3.22.0", "Dart 3.4.0"),
+
+    # Flutter 3.19.x (Dart 3.3.x)
+    "c4cd48e186460b32d44585ce3c103271ab676355": ("3.19.6", "Dart 3.3.4"),
+    "04817c99c9fd4956f27505204f7e344335810aed": ("3.19.0", "Dart 3.3.0"),
+
+    # Flutter 3.16.x (Dart 3.2.x)
+    "f40e976bedff57e69e1b3d89a7c2a3c617a03dad": ("3.16.9", "Dart 3.2.6"),
+    "74d16627b940bb15e50891f82cad6c3e3465bd6d": ("3.16.0", "Dart 3.2.0"),
+
+    # Flutter 3.13.x (Dart 3.1.x)
+    "0545f8705df301877d787107bac1a6e9fc9ee1ad": ("3.13.9", "Dart 3.1.5"),
+    "9064459a8b0dcd32877107f6002cc429a71659d1": ("3.13.4", "Dart 3.1.2"),
+    "1ac611c64eadbd93c5f5aba5494b8fc3b35ee952": ("3.13.0", "Dart 3.1.0"),
+
+    # Flutter 3.10.x (Dart 3.0.x)
+    "cdbeda788a293fa29665dc3fa3d6e63bd221cb0d": ("3.10.6", "Dart 3.0.6"),
+    "d44b5a94c976fbb65815374f61ab5392a220b084": ("3.10.0", "Dart 3.0.0"),
+
+    # Flutter 3.7.x (Dart 2.19.x)
+    "1a65d409c7a1438a34d21b60bf30a6fd5db59314": ("3.7.12", "Dart 2.19.6"),
+    "b24591ed328a2d4ce6505819e2f5898a78132f7f": ("3.7.0", "Dart 2.19.0"),
+
+    # Flutter 3.3.x (Dart 2.18.x)
+    "3316dd8728419ad3534e3f6112aa6291f587078a": ("3.3.10", "Dart 2.18.6"),
+    "5e9e0e0aa8be4ff69facadd706b713f0bb54d5b3": ("3.3.0", "Dart 2.18.0"),
+
+    # Flutter 3.0.x (Dart 2.17.x)
+    "e85ea0e79c6d894c120cda4ee8ee10fe6745e187": ("3.0.5", "Dart 2.17.6"),
+    "d1b9a6938ad77326ac3a94d92bbc77933ed829ed": ("3.0.0", "Dart 2.17.0"),
+
+    # Flutter 2.10.x (Dart 2.16.x)
+    "57d3bac3dd5cb5b0e464ab70e7bc8a0d8cf083ab": ("2.10.5", "Dart 2.16.2"),
+    "776efd2034d50af73e2876d703213601df384e88": ("2.10.0", "Dart 2.16.0")
 }
 
+def resolve_flutter_engine_version(flutter_so_data: bytes) -> tuple:
+    """
+    Resolves Flutter engine commit, Flutter SDK version, and Dart SDK version.
+    Strategy:
+      1. Dynamic Search First:
+         - Inspects Dart VM runtime banner: `<major>.<minor>.<patch> (channel) (...) on "<platform>"`
+         - Extracts null-delimited 40-hex Git commit SHA from libflutter.so.
+      2. Online check (optional, fast 1.5s timeout) if commit is unmapped:
+         - Looks up commit message or engine tag from official Flutter repository.
+      3. Offline Map Fallback:
+         - Checks expanded ENGINE_COMMIT_MAP for exact Flutter version pairing.
+      4. Safe Reporting:
+         - Returns actual facts or "Unknown (Engine SHA: ...)" without fabricating versions.
+    Returns: (engine_commit, display_version_string)
+    """
+    if not flutter_so_data:
+        return None, "Not found"
+
+    # Step 1: Dynamic banner search (embedded in libflutter.so Dart VM runtime)
+    dynamic_dart_version = None
+    banner_match = re.search(
+        rb"([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9.]+)?)\s+\((stable|beta|dev|main)[^)]*\)\s+\([^)]*\)\s+on\s+\"([^\"]+)\"",
+        flutter_so_data
+    )
+    if banner_match:
+        ver = banner_match.group(1).decode("utf-8", "ignore")
+        channel = banner_match.group(2).decode("utf-8", "ignore")
+        dynamic_dart_version = f"{ver} ({channel})"
+
+    # Step 2: Extract 40-character Git SHA engine commit
+    # Prioritize null-terminated 40-hex strings, ignoring test patterns like 8888...
+    commits = [
+        c.decode() for c in re.findall(rb"\x00([0-9a-f]{40})\x00", flutter_so_data)
+        if len(set(c)) > 4
+    ]
+    if not commits:
+        commits = [
+            c.decode() for c in re.findall(rb"\b[0-9a-f]{40}\b", flutter_so_data)
+            if len(set(c)) > 4
+        ]
+    engine_commit = commits[0] if commits else None
+
+    # Step 3: Check offline ENGINE_COMMIT_MAP
+    flutter_version = None
+    if engine_commit and engine_commit in ENGINE_COMMIT_MAP:
+        mapped_flutter, mapped_dart = ENGINE_COMMIT_MAP[engine_commit]
+        flutter_version = mapped_flutter
+        if not dynamic_dart_version:
+            dynamic_dart_version = mapped_dart
+    elif engine_commit:
+        # Step 3b: Fast non-blocking online lookup fallback (1.5s timeout)
+        try:
+            import urllib.request, json
+            url = f"https://api.github.com/repos/flutter/flutter/commits/{engine_commit}"
+            req = urllib.request.Request(url, headers={"User-Agent": "morluto-scanner/1.0"})
+            with urllib.request.urlopen(req, timeout=1.5) as r:
+                data = json.loads(r.read().decode())
+                msg = data.get("commit", {}).get("message", "")
+                m = re.search(r"flutter-([0-9]+\.[0-9]+(?:\.[0-9]+)?)", msg)
+                if m:
+                    flutter_version = m.group(1)
+        except Exception:
+            pass
+
+    # Step 4: Assemble formatted output
+    if flutter_version and dynamic_dart_version:
+        combined = f"Flutter {flutter_version} / Dart {dynamic_dart_version}"
+    elif dynamic_dart_version:
+        combined = f"Dart {dynamic_dart_version}"
+    elif flutter_version:
+        combined = f"Flutter {flutter_version}"
+    elif engine_commit:
+        combined = f"Unknown (Engine {engine_commit[:10]}...)"
+    else:
+        combined = "Unknown"
+
+    return engine_commit, combined
+
+# Android Dangerous (Runtime) Permissions according to Android Security Guidelines.
+# These permissions require explicit runtime approval from the user because they grant
+# direct access to private user data, sensitive sensors, financial actions, or persistent tracking.
 DANGEROUS_PERMS = {
-    "android.permission.READ_CALENDAR", "android.permission.WRITE_CALENDAR",
-    "android.permission.CAMERA", "android.permission.READ_CONTACTS",
-    "android.permission.WRITE_CONTACTS", "android.permission.GET_ACCOUNTS",
-    "android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION",
-    "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.RECORD_AUDIO",
-    "android.permission.READ_PHONE_STATE", "android.permission.READ_PHONE_NUMBERS",
-    "android.permission.CALL_PHONE", "android.permission.ANSWER_PHONE_CALLS",
-    "android.permission.READ_CALL_LOG", "android.permission.WRITE_CALL_LOG",
-    "android.permission.ADD_VOICEMAIL", "android.permission.USE_SIP",
-    "android.permission.PROCESS_OUTGOING_CALLS", "android.permission.BODY_SENSORS",
-    "android.permission.SEND_SMS", "android.permission.RECEIVE_SMS",
-    "android.permission.READ_SMS", "android.permission.RECEIVE_WAP_PUSH",
-    "android.permission.RECEIVE_MMS", "android.permission.READ_EXTERNAL_STORAGE",
-    "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.MANAGE_EXTERNAL_STORAGE",
-    "android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO",
-    "android.permission.READ_MEDIA_AUDIO", "android.permission.POST_NOTIFICATIONS"
+    # --- Calendar: Access to personal schedule, appointments, attendees, and private notes ---
+    "android.permission.READ_CALENDAR",   # Can read personal calendar events, meeting notes, and attendee lists
+    "android.permission.WRITE_CALENDAR",  # Can modify, delete, or inject malicious calendar events / invites
+
+    # --- Camera: Visual surveillance risk ---
+    "android.permission.CAMERA",          # Captures photos and video feeds; risk of covert recording/spying
+
+    # --- Contacts & Accounts: Social graph & identity harvesting ---
+    "android.permission.READ_CONTACTS",   # Extracts complete address book (names, phones, emails) for exfiltration/spam
+    "android.permission.WRITE_CONTACTS",  # Can modify or delete contacts; could forge contacts for social engineering
+    "android.permission.GET_ACCOUNTS",    # Enumerates configured accounts (Google, email, etc.) on the device
+
+    # --- Location: Real-time and persistent physical tracking ---
+    "android.permission.ACCESS_FINE_LOCATION",        # High-accuracy GPS location (reveals home, workplace, exact movements)
+    "android.permission.ACCESS_COARSE_LOCATION",      # Approximate cell/Wi-Fi location (city/neighborhood level)
+    "android.permission.ACCESS_BACKGROUND_LOCATION",  # Continuous tracking even when app is closed/in background
+
+    # --- Microphone: Audio surveillance risk ---
+    "android.permission.RECORD_AUDIO",    # Captures ambient room audio/conversations without showing active UI
+
+    # --- Phone & Telephony: Communication interception & toll fraud ---
+    "android.permission.READ_PHONE_STATE",         # Reads device IDs, cellular carrier, network state, and current call status
+    "android.permission.READ_PHONE_NUMBERS",       # Extracts device's own MSISDN phone number
+    "android.permission.CALL_PHONE",               # Dials phone calls directly without user interaction (toll fraud / premium lines)
+    "android.permission.ANSWER_PHONE_CALLS",       # Automatically answers incoming phone calls
+    "android.permission.READ_CALL_LOG",            # Reads call history (who called whom, call durations, timestamps)
+    "android.permission.WRITE_CALL_LOG",           # Modifies/clears call records to conceal malicious dialing
+    "android.permission.ADD_VOICEMAIL",            # Injects or alters voicemail box records
+    "android.permission.USE_SIP",                  # Places/receives SIP VoIP calls
+    "android.permission.PROCESS_OUTGOING_CALLS",   # Intercepts, redirects, or monitors dialed outgoing phone calls
+
+    # --- Body Sensors: Biometric & health surveillance ---
+    "android.permission.BODY_SENSORS",    # Accesses real-time biometric sensors (heart rate, vitals, fitness monitors)
+
+    # --- SMS & Messaging: Interception of 2FA/OTPs and financial toll fraud ---
+    "android.permission.SEND_SMS",          # Sends SMS messages silently (can trigger premium SMS billing fraud)
+    "android.permission.RECEIVE_SMS",       # Intercepts incoming SMS (commonly targeted to steal 2FA OTP codes)
+    "android.permission.READ_SMS",          # Reads stored text messages containing sensitive personal/financial data
+    "android.permission.RECEIVE_WAP_PUSH",  # Receives WAP push notifications (can trigger arbitrary URL loads or malware)
+    "android.permission.RECEIVE_MMS",       # Intercepts multimedia messages
+
+    # --- Storage & Media: Broad access to personal files and photos ---
+    "android.permission.READ_EXTERNAL_STORAGE",    # Reads shared storage (photos, downloads, documents, other app files)
+    "android.permission.WRITE_EXTERNAL_STORAGE",   # Writes/deletes files on shared storage (ransomware/tampering risk)
+    "android.permission.MANAGE_EXTERNAL_STORAGE",  # Broad "All Files Access" (Android 11+) bypassing scoped storage
+    "android.permission.READ_MEDIA_IMAGES",        # Granular access to user's photo gallery (Android 13+)
+    "android.permission.READ_MEDIA_VIDEO",         # Granular access to user's recorded videos (Android 13+)
+    "android.permission.READ_MEDIA_AUDIO",         # Granular access to user's music and audio files (Android 13+)
+
+    # --- Notifications: Phishing, spoofing & spamming ---
+    "android.permission.POST_NOTIFICATIONS"        # Sends push notifications (can spoof system alerts or deliver phishing links)
 }
 
 def print_banner():
@@ -421,18 +581,8 @@ def extract_flutter_deep_metadata(apk_path):
         if dev_path and ".dart_tool" in dev_path:
             dev_path = dev_path[:dev_path.find("/.dart_tool")]
 
-        # 5. Engine Commit & SDK Version
-        engine_commit = None
-        dart_sdk_version = "3.13.4"
-        if flutter_so_data:
-            commits = re.findall(rb"[0-9a-f]{40}", flutter_so_data)
-            if b"af7e796e161ae0bb1ff0758c71a7105418bd9ded" in flutter_so_data:
-                engine_commit = "af7e796e161ae0bb1ff0758c71a7105418bd9ded"
-            elif commits:
-                engine_commit = commits[0].decode()
-
-            if engine_commit in ENGINE_COMMIT_MAP:
-                dart_sdk_version, _ = ENGINE_COMMIT_MAP[engine_commit]
+        # 5. Engine Commit & SDK Version (Dynamic string search first -> Engine commit map fallback)
+        engine_commit, dart_sdk_version = resolve_flutter_engine_version(flutter_so_data)
 
         # 6. Build Flags
         build_flags = []
