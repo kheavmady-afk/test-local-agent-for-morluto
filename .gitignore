@@ -76,6 +76,7 @@ website/_site/
 # Scan outputs
 /deploy/py_scan/results/*
 !/deploy/py_scan/results/.gitkeep
+comparison_matrix.md
 
 # Target binaries
 *.apk

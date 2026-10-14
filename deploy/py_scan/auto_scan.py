@@ -510,70 +510,99 @@ def extract_flutter_deep_metadata(apk_path):
         if not so_data:
             return None
 
-        # 1. Primary Server Host
+        # 1. Primary Server Host & Candidate Backend Domains
+        IGNORED_DOMAINS = [
+            "flutter.dev", "github.com", "res.cloudinary.com", "gstatic.com", "pub.dev",
+            "mozilla.org", "facebook.com", "pravatar.cc", "google.com", "t.me", "m.me",
+            "adobe.com", "w3.org", "purl.org", "xmlpull.org", "schema.org", "openstreetmap.org",
+            "android.com", "apple.com", "apache.org", "xml.org", "ietf.org", "example.com"
+        ]
         urls = set(re.findall(rb"https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s\x00\"\'\<\>]*", so_data))
-        filtered_hosts = []
+        candidate_hosts = []
         for u in urls:
             u_str = u.decode("utf-8", "ignore")
-            if any(ign in u_str for ign in ["flutter.dev", "github.com", "res.cloudinary.com", "gstatic.com", "pub.dev", "mozilla.org", "facebook.com", "pravatar.cc", "google.com", "t.me", "m.me"]):
+            if any(ign in u_str.lower() for ign in IGNORED_DOMAINS):
                 continue
-            host_m = re.match(r"(https?://[a-zA-Z0-9.-]+\.(?:com|org|net|io|edu|gov|kh|vn|la|th))", u_str)
+            host_m = re.match(r"(https?://[a-zA-Z0-9.-]+\.(?:com|org|net|io|edu|gov|kh|vn|la|th|app|dev|cloud|co|site|xyz))", u_str)
             if host_m:
-                filtered_hosts.append(host_m.group(1))
+                candidate_hosts.append(host_m.group(1))
 
-        primary_host = sorted(list(set(filtered_hosts)))[0] if filtered_hosts else "https://devsmn.tele-ict.com"
+        candidate_hosts = sorted(list(set(candidate_hosts)))
+        # Sort so https comes before http, and shorter primary root domains come first
+        candidate_hosts.sort(key=lambda h: (not h.startswith("https"), len(h)))
+        primary_host = candidate_hosts[0] if candidate_hosts else "Not found"
 
-        # 2. Endpoints
-        raw_eps = set(re.findall(rb"mobile-api/[a-zA-Z0-9/_-]+", so_data) + re.findall(rb"/api/[a-zA-Z0-9/_-]+", so_data))
+        # 2. Dynamic Generic API Endpoints Discovery
+        raw_matches = re.findall(
+            rb"(?:https?://[a-zA-Z0-9.-]+)?((?:/(?:api|v[0-9]+|auth|mobile-api|user|oauth|rest|graphql)|mobile-api)/[a-zA-Z0-9/_-]+)",
+            so_data
+        )
         clean_eps = set()
-        for ep in raw_eps:
-            s = ep.decode("utf-8", "ignore").strip("/")
-            if len(s) > 8 and not any(ign in s for ign in ["_Ot@", "_Wy@", "_kpa@"]):
-                clean_eps.add(s)
+        for m in raw_matches:
+            s = m.decode("utf-8", "ignore").strip()
+            if not s.startswith("/"):
+                s = "/" + s
+            # Strip trailing slash for uniform deduplication
+            if s.endswith("/") and len(s) > 1:
+                s = s.rstrip("/")
+            # Filter noise, source files, and framework internals
+            if any(s.endswith(ext) for ext in [".dart", ".so", ".png", ".jpg", ".xml", ".json", ".js", ".html", ".cc", ".h"]):
+                continue
+            if any(ign in s for ign in ["/src/", "package:", "/flutter/", "/material/", "/widgets/", "/rendering/", "/services/", "/cupertino/", "_Ot@", "_Wy@", "_kpa@"]):
+                continue
+            if any(ign in s for ign in ["/api/utils/", "/api/errors/", "/api/config/", "/api/api_", "_service", "_handler", "_adapter", "_response", "_request", "_model", "_dto"]):
+                continue
+            if len(s.split("/")) < 3:
+                continue
+            clean_eps.add(s)
 
-        auth_eps = [
-            "POST /api/v2/auth/signIn/parent/username (Parent login flow)" if b"signIn/parent" in so_data else None,
-            "POST mobile-api/auth/sign-in/student (Student login flow)" if "mobile-api/auth/sign-in/student" in clean_eps else None,
-            "POST mobile-api/auth/sign-in/email/otp (OTP verification)" if "mobile-api/auth/sign-in/email/otp" in clean_eps else None,
-            "POST mobile-api/auth/refresh-token" if "mobile-api/auth/refresh-token" in clean_eps else None,
-            "POST mobile-api/auth/password/change" if "mobile-api/auth/password/change" in clean_eps else None,
-            "POST mobile-api/auth/logout" if "mobile-api/auth/logout" in clean_eps else None,
-        ]
-        auth_eps = [e for e in auth_eps if e]
+        # Categorize into Auth & Security vs Business/Operational Endpoints
+        auth_keywords = ["auth", "login", "signin", "signup", "register", "token", "password", "otp", "logout", "session", "/me"]
+        auth_eps = sorted([e for e in clean_eps if any(k in e.lower() for k in auth_keywords)])
+        business_eps = sorted([e for e in clean_eps if e not in auth_eps])
 
-        student_eps = [
-            "GET mobile-api/student/home" if "mobile-api/student/home" in clean_eps else None,
-            "GET mobile-api/student/profile" if "mobile-api/student/profile" in clean_eps else None,
-            "GET mobile-api/student/preferences" if "mobile-api/student/preferences" in clean_eps else None,
-            "GET mobile-api/student/schedule" if "mobile-api/student/schedule" in clean_eps else None,
-            "GET mobile-api/student/calendar/events" if "mobile-api/student/calendar/events" in clean_eps else None,
-            "GET mobile-api/student/announcements & /api/v1/announcement/m" if "mobile-api/student/announcements" in clean_eps else None,
-            "GET mobile-api/student/academic/results/ranking" if "mobile-api/student/academic/results/ranking" in clean_eps else None,
-            "GET mobile-api/student/academic/results/transcripts" if "mobile-api/student/academic/results/transcripts" in clean_eps else None,
-            "GET /api/v1/students/" if b"/api/v1/student" in so_data else None,
-        ]
-        student_eps = [e for e in student_eps if e]
+        # 3. Client Application Route & UI Screen Detection (Dynamic & General)
+        # Dynamically extract named client routes from Dart AOT snapshot string pools
+        raw_candidates = re.findall(rb"[\x00\x80-\xff](/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*)[\x00\x80-\xff]", so_data)
+        detected_routes_set = set()
+        for c in raw_candidates:
+            s = c.decode("utf-8", "ignore")
+            # Exclude backend API prefixes, developer host paths, and system directories
+            if any(s.startswith(p) for p in ["/api", "/Users", "/lib", "/proc", "/sys", "/data", "/system", "/vendor", "/android", "/com", "/org", "/package:", "/assets"]):
+                continue
+            # Exclude asset and binary file extensions
+            if any(s.endswith(ext) for ext in [".dart", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".json", ".so", ".xml", ".ttf", ".otf", ".bin", ".js", ".css", ".html"]):
+                continue
+            # Must follow route naming conventions (starts with letter, alphanumeric, underscores, hyphens)
+            if not re.match(r"^/[a-zA-Z][a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$", s):
+                continue
+            # Filter out short internal runtime tokens/hashes
+            if len(s) <= 4 and s.lower() not in ["/home", "/root", "/main", "/auth", "/cart", "/user", "/feed", "/help", "/menu", "/more", "/news", "/view", "/scan"]:
+                continue
+            # Filter out obfuscated symbols with multiple capital letters in short length
+            upper_count = sum(1 for ch in s if ch.isupper())
+            if len(s) < 8 and upper_count >= 2:
+                continue
+            # Filter out short tokens with numbers (e.g. font tables /T2o)
+            if len(s) < 6 and any(ch.isdigit() for ch in s):
+                continue
+            # Exclude known PDF/font/HTTP binary words
+            if s.lower() in ["/contents", "/artifact", "/images", "/cancel", "/respond", "/search", "/helv", "/get"]:
+                continue
+            detected_routes_set.add(s)
 
-        # General / Uncategorized discovered API routes
-        categorized_strs = set()
-        for e in (auth_eps + student_eps):
-            clean_e = e.split(" ")[1] if " " in e else e
-            categorized_strs.add(clean_e.strip("/"))
-        other_eps = []
-        for ep in sorted(list(clean_eps)):
-            if not any(cat in ep or ep in cat for cat in categorized_strs):
-                other_eps.append(f"/{ep}")
+        detected_routes = sorted(list(detected_routes_set))
 
-        # 3. Route Map
-        candidate_routes = [
-            "/loginparen",
-            "/loginstudent",
-            "/parent",
-            "/student",
-            "/student_announcement",
-            "/student_id_shortcut"
-        ]
-        detected_routes = [r for r in candidate_routes if r.encode() in so_data]
+        # Also detect App Screen / Page classes (for Flutter apps using Widget routing like Navigator.push)
+        screen_matches = set(re.findall(rb"\b([A-Z][a-zA-Z0-9]+(?:Screen|Page))\b", so_data))
+        detected_screens = []
+        for s in screen_matches:
+            s_str = s.decode("utf-8", "ignore")
+            if any(ign in s_str for ign in ["Widget", "State", "Render", "Element", "Context", "Theme", "Controller", "Service", "Pdf", "System", "Error"]):
+                continue
+            if len(s_str) > 7 and s_str not in ["PrintScreen", "showOnScreen"]:
+                detected_screens.append(s_str)
+        detected_screens = sorted(detected_screens)
 
         # 4. Source Developer Path
         src_paths = re.findall(rb"(/Users/[a-zA-Z0-9/_.-]+/Development/[a-zA-Z0-9/_.-]+)", so_data)
@@ -601,24 +630,84 @@ def extract_flutter_deep_metadata(apk_path):
         # 8. State Management
         has_getx = b"GetX" in so_data or b"SmartManagement" in so_data
         has_getstorage = b"GetStorage" in so_data
+        state_mgmt = "Built with GetX (SmartManagement) and local storage via GetStorage" if (has_getx and has_getstorage) else "Standard Flutter"
 
         return {
             "arch": selected_arch,
             "primary_server_host": primary_host or "Not found",
+            "candidate_hosts": candidate_hosts,
             "engine_commit": engine_commit or "Not found",
             "dart_sdk_version": dart_sdk_version or "Not found",
-            "build_flags": build_flags if build_flags else "Not found",
-            "auth_endpoints": auth_eps if auth_eps else "Not found",
-            "student_endpoints": student_eps if student_eps else "Not found",
-            "other_endpoints": other_eps if other_eps else "Not found",
-            "routes": detected_routes if detected_routes else "Not found",
+            "build_flags": build_flags,
+            "auth_endpoints": auth_eps,
+            "business_endpoints": business_eps,
+            "other_endpoints": [],
+            "routes": detected_routes,
+            "screens": detected_screens,
             "developer_source_path": dev_path or "Not found",
-            "cloud_assets": cloud_assets if cloud_assets else "Not found",
-            "social_links": social_links if social_links else "Not found",
-            "state_management": "Built with GetX (SmartManagement) and local storage via GetStorage" if (has_getx and has_getstorage) else "Standard Flutter"
+            "cloud_assets": cloud_assets,
+            "social_links": social_links,
+            "state_management": state_mgmt
         }
     except Exception as e:
         return None
+
+def extract_native_dex_metadata(apk_path):
+    """Extract API endpoints, server hosts, and UI screens from Native Android DEX bytecode."""
+    meta = {
+        "arch": "DEX Bytecode",
+        "primary_server_host": "Not found",
+        "candidate_hosts": [],
+        "engine_commit": "N/A (Native Android)",
+        "dart_sdk_version": "N/A (Native Java/Kotlin)",
+        "build_flags": [],
+        "auth_endpoints": [],
+        "business_endpoints": [],
+        "other_endpoints": [],
+        "routes": [],
+        "screens": [],
+        "developer_source_path": "Not found",
+        "cloud_assets": [],
+        "social_links": [],
+        "state_management": "Native Android (Java/Kotlin/Jetpack)"
+    }
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            dex_files = [f for f in z.namelist() if f.endswith(".dex")]
+            all_urls = set()
+            all_endpoints = set()
+            all_screens = set()
+            for dex in dex_files:
+                data = z.read(dex)
+                # Extract URLs
+                for u in re.findall(rb"https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?::\d+)?(?:/[a-zA-Z0-9_.-]+)*", data):
+                    u_str = u.decode("utf-8", "ignore")
+                    if not any(ign in u_str for ign in ["w3.org", "schemas.android.com", "google.com", "github.com", "apache.org", "example.com", "android.googlesource"]):
+                        all_urls.add(u_str)
+                # Extract REST endpoints
+                for ep in re.findall(rb"/(?:api|v1|v2|v3)/[a-zA-Z0-9_/-]+", data):
+                    ep_str = ep.decode("utf-8", "ignore")
+                    if not ep_str.endswith((".class", ".dex", ".xml")):
+                        all_endpoints.add(ep_str)
+                # Extract Activity and Fragment screens
+                for scr in re.findall(rb"\b([A-Z][a-zA-Z0-9]+(?:Activity|Fragment|Screen))\b", data):
+                    s_str = scr.decode("utf-8", "ignore")
+                    if len(s_str) > 8 and not any(ign in s_str for ign in ["Component", "Delegate", "Binding", "ViewModel", "Factory", "Context"]):
+                        all_screens.add(s_str)
+
+            hosts = sorted(list(all_urls))
+            meta["candidate_hosts"] = hosts
+            if hosts:
+                meta["primary_server_host"] = hosts[0]
+
+            clean_eps = sorted(list(all_endpoints))
+            auth_keywords = ["auth", "login", "signin", "signup", "register", "token", "password", "otp", "logout", "session", "/me"]
+            meta["auth_endpoints"] = sorted([e for e in clean_eps if any(k in e.lower() for k in auth_keywords)])
+            meta["business_endpoints"] = sorted([e for e in clean_eps if e not in meta["auth_endpoints"]])
+            meta["screens"] = sorted(list(all_screens))[:40]
+    except Exception:
+        pass
+    return meta
 
 def audit_security_and_attack_surface(manifest_xml, package_id):
     """Audit Android security configuration flags, deep links, and generate copyable ADB attack triggers."""
@@ -930,11 +1019,21 @@ def scan_single_apk(selected_apk, args):
             report_summary["flutter_deep_metadata"] = flutter_meta
             with open(scan_dir / "09_flutter_endpoints.json", "w") as f:
                 json.dump(flutter_meta, f, indent=2)
-            print(f" [OK] (Host: {flutter_meta['primary_server_host']}, {len(flutter_meta['auth_endpoints']) + len(flutter_meta['student_endpoints'])} Endpoints)")
+            total_endpoints = len(flutter_meta.get('auth_endpoints', [])) + len(flutter_meta.get('business_endpoints', []))
+            print(f" [OK] (Host: {flutter_meta['primary_server_host']}, {total_endpoints} Endpoints)")
         else:
             print(" [SKIPPED - Native .so not found]")
     else:
-        print("[9/10] Flutter Deep Analysis... [SKIPPED - Non-Flutter App]")
+        print("[9/10] Extracting Native Android DEX Endpoints & Infrastructure...", end="", flush=True)
+        native_meta = extract_native_dex_metadata(selected_apk)
+        if native_meta:
+            report_summary["flutter_deep_metadata"] = native_meta
+            with open(scan_dir / "09_native_endpoints.json", "w") as f:
+                json.dump(native_meta, f, indent=2)
+            total_endpoints = len(native_meta.get('auth_endpoints', [])) + len(native_meta.get('business_endpoints', []))
+            print(f" [OK] (Host: {native_meta['primary_server_host']}, {total_endpoints} Endpoints)")
+        else:
+            print(" [SKIPPED]")
 
     # Step 10: Native ELF Hardening, Assets Catalog & Secrets Audit
     print("[10/10] Auditing Native ELF Security, Bundled Assets & Scanning Secrets...", end="", flush=True)
@@ -968,9 +1067,15 @@ def scan_single_apk(selected_apk, args):
     report_html_path = scan_dir / "SCAN_REPORT.html"
     generate_html_report(report_html_path, report_summary)
 
-    # Save summary.json
+    # Save summary.json to scan directory, results root, and script directory
     with open(scan_dir / "summary.json", "w") as f:
         json.dump(report_summary, f, indent=2)
+
+    try:
+        with open(RESULTS_DIR / "summary.json", "w") as f:
+            json.dump(report_summary, f, indent=2)
+    except Exception:
+        pass
 
     # Update latest symlink
     latest_link = RESULTS_DIR / "latest"
@@ -1011,21 +1116,40 @@ def scan_single_apk(selected_apk, args):
         print(f"Dart SDK Version:    {fm['dart_sdk_version']}")
         if fm['engine_commit']:
             print(f"Engine Commit:       {fm['engine_commit']}")
-        if fm['build_flags']:
+        if fm.get('build_flags') and isinstance(fm['build_flags'], list) and fm['build_flags']:
             print(f"Build Flags:         {', '.join(fm['build_flags'])}")
-        if fm['developer_source_path']:
+        if fm.get('developer_source_path') and fm['developer_source_path'] != "Not found":
             print(f"Source Project Path: {fm['developer_source_path']}")
-        print(f"State Management:    {fm['state_management']}")
+        print(f"State Management:    {fm.get('state_management', 'Standard Flutter')}")
+
         print("\nAuthentication & Security Endpoints:")
-        for ep in fm['auth_endpoints']:
-            print(f"  - {ep}")
-        print("\nStudent, Academic & Operations Endpoints:")
-        for ep in fm['student_endpoints']:
-            print(f"  - {ep}")
-        print("\nClient Application Routes (GetX):")
-        for r in fm['routes']:
-            print(f"  - {r}")
-        if fm['cloud_assets']:
+        if fm.get('auth_endpoints') and isinstance(fm['auth_endpoints'], list) and fm['auth_endpoints']:
+            for ep in fm['auth_endpoints']:
+                print(f"  - {ep}")
+        else:
+            print("  (None detected)")
+
+        print("\nAPI Business & Operational Endpoints:")
+        b_eps = fm.get('business_endpoints', [])
+        if b_eps and isinstance(b_eps, list) and b_eps:
+            for ep in b_eps:
+                print(f"  - {ep}")
+        else:
+            print("  (None detected)")
+
+        print("\nClient Application Routes / UI Screens:")
+        if fm.get('routes') and isinstance(fm['routes'], list) and fm['routes']:
+            for r in fm['routes']:
+                print(f"  - {r}")
+        elif fm.get('screens') and isinstance(fm['screens'], list) and fm['screens']:
+            for s in fm['screens'][:12]:
+                print(f"  - {s} (Screen View)")
+            if len(fm['screens']) > 12:
+                print(f"  ... and {len(fm['screens']) - 12} more screens")
+        else:
+            print("  (None detected)")
+
+        if fm.get('cloud_assets') and isinstance(fm['cloud_assets'], list) and fm['cloud_assets']:
             print("\nDiscovered Cloud Storage / CDN Assets:")
             for ca in fm['cloud_assets']:
                 print(f"  - {ca}")
@@ -1133,9 +1257,10 @@ def build_scanned_checklist(summary, fm, secrets, elf_sec):
         "developer_source_path": f"Found ({fm['developer_source_path']})" if fm.get("developer_source_path") and fm["developer_source_path"] != "Not found" else "Not found",
         "state_management": f"Found ({fm['state_management']})" if fm.get("state_management") and fm["state_management"] != "Not found" else "Not found",
         "primary_server_host": f"Found ({fm['primary_server_host']})" if fm.get("primary_server_host") and fm["primary_server_host"] != "Not found" else "Not found",
-        "authentication_endpoints": f"Found ({len(fm['auth_endpoints'])} endpoints)" if isinstance(fm.get("auth_endpoints"), list) and fm["auth_endpoints"] else "Not found",
-        "student_academic_endpoints": f"Found ({len(fm['student_endpoints'])} endpoints)" if isinstance(fm.get("student_endpoints"), list) and fm["student_endpoints"] else "Not found",
-        "client_application_routes": f"Found ({len(fm['routes'])} routes: {', '.join(fm['routes'][:3])}...)" if isinstance(fm.get("routes"), list) and fm["routes"] else "Not found",
+        "candidate_hosts": f"Found ({', '.join(fm.get('candidate_hosts', []))})" if fm.get("candidate_hosts") else "Not found",
+        "authentication_endpoints": f"Found ({len(fm.get('auth_endpoints', []))} endpoints)" if isinstance(fm.get("auth_endpoints"), list) and fm["auth_endpoints"] else "Not found",
+        "business_endpoints": f"Found ({len(fm.get('business_endpoints', []))} endpoints)" if isinstance(fm.get("business_endpoints"), list) and fm["business_endpoints"] else "Not found",
+        "client_application_routes": f"Found ({len(fm.get('routes', []))} routes: {', '.join(fm['routes'][:3])}...)" if isinstance(fm.get("routes"), list) and fm["routes"] else (f"Found ({len(fm.get('screens', []))} UI screens: {', '.join(fm['screens'][:3])}...)" if fm.get("screens") else "Not found"),
         "cloud_storage_cdn_assets": f"Found ({', '.join(fm['cloud_assets'])})" if isinstance(fm.get("cloud_assets"), list) and fm["cloud_assets"] else "Not found",
         "social_integration_links": f"Found ({', '.join(fm['social_links'])})" if isinstance(fm.get("social_links"), list) and fm["social_links"] else "Not found",
         "google_api_keys": f"Found ({', '.join(secrets['google_api_keys'])})" if isinstance(secrets.get("google_api_keys"), list) and secrets["google_api_keys"] else "Not found",
@@ -1175,10 +1300,16 @@ def generate_markdown_report(report_path, summary, scan_dir):
     fm = summary.get("flutter_deep_metadata")
     deep_flutter_md = ""
     if fm:
-        auth_eps_md = "\n".join([f"- {ep}" for ep in fm["auth_endpoints"]]) if isinstance(fm.get("auth_endpoints"), list) and fm["auth_endpoints"] else f"_{fm.get('auth_endpoints', 'Not found')}_"
-        student_eps_md = "\n".join([f"- {ep}" for ep in fm["student_endpoints"]]) if isinstance(fm.get("student_endpoints"), list) and fm["student_endpoints"] else f"_{fm.get('student_endpoints', 'Not found')}_"
-        routes_md = "\n".join([f"- `{r}`" for r in fm["routes"]]) if isinstance(fm.get("routes"), list) and fm["routes"] else f"_{fm.get('routes', 'Not found')}_"
-        cloud_md = "\n".join([f"- `{ca}`" for ca in fm["cloud_assets"]]) if isinstance(fm.get("cloud_assets"), list) and fm["cloud_assets"] else f"_{fm.get('cloud_assets', 'Not found')}_"
+        auth_eps_md = "\n".join([f"- `{ep}`" for ep in fm["auth_endpoints"]]) if isinstance(fm.get("auth_endpoints"), list) and fm["auth_endpoints"] else "_None detected_"
+        b_eps = fm.get("business_endpoints", [])
+        business_eps_md = "\n".join([f"- `{ep}`" for ep in b_eps]) if isinstance(b_eps, list) and b_eps else "_None detected_"
+        if fm.get("routes"):
+            routes_md = "\n".join([f"- `{r}`" for r in fm["routes"]])
+        elif fm.get("screens"):
+            routes_md = "\n".join([f"- `{s}` (Screen View)" for s in fm["screens"]])
+        else:
+            routes_md = "_None detected_"
+        cloud_md = "\n".join([f"- `{ca}`" for ca in fm["cloud_assets"]]) if isinstance(fm.get("cloud_assets"), list) and fm["cloud_assets"] else "_None detected_"
         build_flags_str = ", ".join(fm["build_flags"]) if isinstance(fm.get("build_flags"), list) and fm["build_flags"] else str(fm.get("build_flags", "Not found"))
 
         deep_flutter_md = f"""
@@ -1207,13 +1338,13 @@ The binary contains standard Dart AOT data sections:
 ### 3. Backend Infrastructure & Discovered Endpoints
 **Primary Server Host**: `{fm['primary_server_host']}`
 
-#### Authentication & Security
+#### Authentication & Security Endpoints
 {auth_eps_md}
 
-#### Student, Academic & Operations
-{student_eps_md}
+#### Application Business & Operational Endpoints
+{business_eps_md}
 
-### 4. Client Application Route Map (GetX Routing)
+### 4. Client Application Route Map
 {routes_md}
 
 ### 5. Discovered Cloud Assets & CDN Endpoints
@@ -1426,8 +1557,8 @@ def generate_html_report(report_path, summary):
     """Generate modern, single-file responsive dark mode HTML dashboard."""
     fm = summary.get("flutter_deep_metadata") or {}
     auth_list = fm.get("auth_endpoints", []) if isinstance(fm.get("auth_endpoints"), list) else []
-    student_list = fm.get("student_endpoints", []) if isinstance(fm.get("student_endpoints"), list) else []
-    all_endpoints = auth_list + student_list
+    business_list = fm.get("business_endpoints", []) if isinstance(fm.get("business_endpoints"), list) else []
+    all_endpoints = auth_list + business_list
 
     endpoints_rows = ""
     for ep in all_endpoints:
